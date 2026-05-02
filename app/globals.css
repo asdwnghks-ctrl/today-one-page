@@ -1,0 +1,69 @@
+@import "tailwindcss";
+
+:root {
+  --background: #fff6ee;
+  --foreground: #3a2e3a;
+  --muted: #8b7088;
+  --line: #f2dce5;
+  --cream: #fff8f1;
+  --pink: #a93f62;
+  --pink-soft: #fce4ec;
+  --olive: #5f6f3e;
+  --olive-soft: #e8e5d4;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--foreground);
+  background:
+    radial-gradient(ellipse at top right, #fff0f3 0%, #fff6ee 42%, #faf0f5 100%);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.soft-shell {
+  position: relative;
+}
+
+.soft-shell::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.36;
+  background-image:
+    radial-gradient(circle, #f4b5c9 1px, transparent 1px),
+    radial-gradient(circle, #c8b5e8 1px, transparent 1px);
+  background-position: 0 0, 30px 40px;
+  background-size: 60px 60px, 80px 80px;
+}
+
+.card {
+  border: 1px solid rgba(242, 220, 229, 0.95);
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 14px 40px rgba(169, 63, 98, 0.08);
+}
+
+.focus-ring:focus-visible {
+  outline: 3px solid rgba(169, 63, 98, 0.25);
+  outline-offset: 2px;
+}

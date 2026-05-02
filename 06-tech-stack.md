@@ -17,7 +17,7 @@ MVP는 **Vercel + Supabase만으로 충분하다.**
 - **Backend:** Supabase
 - **Database:** Supabase Postgres
 - **Realtime:** Supabase Realtime
-- **Auth:** Supabase Auth 또는 PIN 기반 커스텀 로그인
+- **Auth:** Supabase Auth 기반 이름 선택 로그인
 - **Deploy:** Vercel
 
 ## 왜 이 조합인가
@@ -37,6 +37,7 @@ MVP는 **Vercel + Supabase만으로 충분하다.**
 - 로그인/세션 관리
 - 책, segment seed 데이터
 - 성서 segment 읽음 체크 상태
+- 다음 책 제안/수락 상태
 - 하이라이트
 - 장별 코멘트와 답글
 - 실시간 채팅 메시지
@@ -103,25 +104,20 @@ messages
 
 메신저 접속 상태는 Supabase Realtime Presence로 처리한다. 앱이 열려 있으면 현재 사용자를 chat presence channel에 등록하고, 상대가 같은 channel에 있으면 접속 중으로 표시한다.
 
-메신저 읽음 상태는 메시지 단위 또는 사용자 단위로 처리한다. MVP에서는 단순하게 내가 보낸 메시지에 `read_at`을 기록해 "읽음" 표시를 만들고, 나중에 필요하면 `message_reads` 테이블로 분리한다. 성서 코멘트에는 `read_at`이나 presence 개념을 붙이지 않는다.
+메신저 읽음 상태는 `message_reads` 테이블로 처리한다. 사용자가 둘뿐이라도 누가 언제 읽었는지 명확히 남기는 편이 안전하다. 성서 코멘트에는 `read_at`이나 presence 개념을 붙이지 않는다.
 
 ## 인증 방향
 
-회원가입은 만들지 않는다. 가능한 선택지는 두 가지다.
+회원가입은 만들지 않는다. Supabase Auth를 내부적으로 쓰고, 화면은 이름 선택 + 비밀번호 입력처럼 보이게 만든다.
 
-### 1. Supabase Auth 사용
+### 선택: Supabase Auth 사용
 
 - 주환, 희진 계정을 미리 만들어둔다.
-- 이메일/비밀번호 또는 매직링크를 쓴다.
+- 내부적으로 이메일/비밀번호 세션을 쓴다.
+- 화면은 이름 선택 + 비밀번호 입력처럼 보이게 만든다.
 - 보안과 세션 관리가 안정적이다.
 
-### 2. PIN 기반 커스텀 로그인
-
-- 랜딩에서 이름을 고르고 PIN을 입력한다.
-- 앱의 감성에는 가장 잘 맞는다.
-- 보안 처리를 직접 설계해야 한다.
-
-MVP 추천은 **Supabase Auth를 내부적으로 쓰되, 화면은 이름 선택 + 비밀번호 입력처럼 보이게 만드는 방식**이다. 사용자는 단순한 PIN 로그인처럼 느끼고, 내부 세션은 Supabase가 관리한다.
+사용자는 단순한 PIN/비밀번호 로그인처럼 느끼고, 내부 세션은 Supabase가 관리한다. 완전 커스텀 PIN 로그인은 만들지 않는다.
 
 ## 지금 당장 필요한 외부 도구
 
