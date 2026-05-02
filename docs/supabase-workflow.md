@@ -5,7 +5,10 @@
 - Supabase CLI runs through `npx supabase`.
 - Local Supabase config exists in `supabase/config.toml`.
 - Local Docker-based Supabase is optional and not required for the MVP connection.
-- Remote project is not linked yet because the CLI needs a Supabase access token.
+- Remote project is linked.
+- Project name: `today-one-page`
+- Project ref: `ggezuvdhuaizerfmkevl`
+- Project URL: `https://ggezuvdhuaizerfmkevl.supabase.co`
 
 ## What Supabase Handles
 
@@ -20,7 +23,7 @@
 
 ## Required Values
 
-To link this repository to Supabase, prepare these values:
+To link or re-link this repository to Supabase, prepare these values:
 
 - Supabase access token
 - Supabase project ref
@@ -40,11 +43,19 @@ The token must not be committed to GitHub. It can be provided through the termin
 
 ## Link Command
 
-After the remote project exists:
+The repository is already linked. To re-link:
 
 ```bash
 $env:SUPABASE_ACCESS_TOKEN="<token>"
-npx supabase link --project-ref <project-ref> --password <database-password>
+npx supabase link --project-ref ggezuvdhuaizerfmkevl
+```
+
+The CLI will ask for the database password. Do not commit the password or access token.
+
+There is also a helper script:
+
+```powershell
+.\scripts\link-supabase.ps1
 ```
 
 ## Environment Variables
@@ -70,4 +81,3 @@ MVP tables should cover:
 - `comment_replies`: replies to comments/highlights
 - `highlights`: verse references and notes
 - `messages`: realtime chat messages
-
