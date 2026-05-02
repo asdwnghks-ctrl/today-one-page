@@ -36,12 +36,12 @@ MVP는 **Vercel + Supabase만으로 충분하다.**
 - 두 사람의 사용자 정보
 - 로그인/세션 관리
 - 책, segment seed 데이터
-- 읽음 체크 상태
+- 성서 segment 읽음 체크 상태
 - 하이라이트
 - 장별 코멘트와 답글
 - 실시간 채팅 메시지
-- 읽음 상태
-- 접속 상태 presence
+- 메신저 메시지 읽음 상태
+- 메신저 접속 상태 presence
 - 나중에 이미지가 필요해지면 Storage
 
 현재 Supabase 상태:
@@ -101,9 +101,9 @@ messages
 
 두 사람만 쓰는 앱이므로 처음에는 `room_id` 없이 시작해도 된다. 나중에 구조를 더 일반화하고 싶으면 `chat_rooms`, `chat_members`를 추가할 수 있다.
 
-접속 상태는 Supabase Realtime Presence로 처리한다. 앱이 열려 있으면 현재 사용자를 presence channel에 등록하고, 상대가 같은 channel에 있으면 접속 중으로 표시한다.
+메신저 접속 상태는 Supabase Realtime Presence로 처리한다. 앱이 열려 있으면 현재 사용자를 chat presence channel에 등록하고, 상대가 같은 channel에 있으면 접속 중으로 표시한다.
 
-읽음 상태는 메시지 단위 또는 사용자 단위로 처리한다. MVP에서는 단순하게 내가 보낸 메시지에 `read_at`을 기록해 "읽음" 표시를 만들고, 나중에 필요하면 `message_reads` 테이블로 분리한다.
+메신저 읽음 상태는 메시지 단위 또는 사용자 단위로 처리한다. MVP에서는 단순하게 내가 보낸 메시지에 `read_at`을 기록해 "읽음" 표시를 만들고, 나중에 필요하면 `message_reads` 테이블로 분리한다. 성서 코멘트에는 `read_at`이나 presence 개념을 붙이지 않는다.
 
 ## 인증 방향
 
