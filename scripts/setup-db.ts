@@ -32,7 +32,7 @@ type SeedData = {
   }>;
 };
 
-const WOL_BASE = "https://wol.jw.org/ko/wol/binav/r8/lp-ko/nwtsty";
+const WOL_BASE = "https://wol.jw.org/ko/wol/b/r8/lp-ko/nwtsty";
 const ECCLESIASTES_VERSES = [18, 26, 22, 16, 20, 12, 29, 17, 18, 20, 10, 14];
 
 async function upsert<T extends object>(table: string, rows: T[], onConflict: string) {

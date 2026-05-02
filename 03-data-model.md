@@ -117,9 +117,9 @@ segments
 
 - 기본 탐색: `https://wol.jw.org/ko/wol/binav/r8/lp-ko`
 - 책 페이지: `https://wol.jw.org/ko/wol/binav/r8/lp-ko/nwtsty/{book_number}`
-- 장 페이지: `https://wol.jw.org/ko/wol/binav/r8/lp-ko/nwtsty/{book_number}/{chapter}`
+- 장 페이지: `https://wol.jw.org/ko/wol/b/r8/lp-ko/nwtsty/{book_number}/{chapter}`
 
-예: 전도서 1장은 `https://wol.jw.org/ko/wol/binav/r8/lp-ko/nwtsty/21/1`
+예: 전도서 1장은 `https://wol.jw.org/ko/wol/b/r8/lp-ko/nwtsty/21/1`
 
 필요하면 나중에 다음 필드를 추가할 수 있다.
 

@@ -373,7 +373,7 @@ export default function Page() {
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-[#F2DCE5] bg-[#FFF8F1]/95 px-3 py-2 backdrop-blur">
         <div className="mx-auto grid max-w-[520px] grid-cols-4 gap-2">
           <TabButton active={tab === "today"} icon={<Home size={18} />} label="오늘" onClick={() => setTab("today")} />
-          <TabButton active={tab === "reading"} icon={<BookOpen size={18} />} label="읽기" onClick={() => setTab("reading")} />
+          <TabButton active={tab === "reading"} icon={<BookOpen size={18} />} label="코멘트" onClick={() => setTab("reading")} />
           <TabButton active={tab === "chat"} icon={<MessageCircle size={18} />} label="채팅" badge={unreadMessages} onClick={() => setTab("chat")} />
           <TabButton active={tab === "records"} icon={<Library size={18} />} label="기록" onClick={() => setTab("records")} />
         </div>
@@ -466,9 +466,9 @@ function TodayView({
 
       <div className="card rounded-3xl p-5">
         <div className="mb-4 flex items-center justify-between">
-          <h3 className="font-black">이 장의 기록</h3>
+          <h3 className="font-black">이 장의 코멘트</h3>
           <button onClick={() => onOpenSegment(segment.id)} className="text-sm font-bold" style={{ color: me.accent_color }}>
-            열기
+            코멘트 열기
           </button>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
@@ -506,7 +506,7 @@ function ReadingView({
   return (
     <div className="grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)]">
       <div className="card rounded-3xl p-4">
-        <h2 className="mb-3 text-lg font-black">책 고르기</h2>
+          <h2 className="mb-3 text-lg font-black">코멘트할 장</h2>
         <div className="max-h-[360px] space-y-2 overflow-auto pr-1">
           {state.books.map((book) => (
             <button
@@ -523,7 +523,7 @@ function ReadingView({
 
       <div className="space-y-5">
         <div className="card rounded-3xl p-4">
-          <h2 className="mb-3 text-lg font-black">{selectedBook?.name ?? "책"} 장 목록</h2>
+          <h2 className="mb-3 text-lg font-black">{selectedBook?.name ?? "책"} 코멘트</h2>
           <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8">
             {bookSegments.map((segment) => {
               const done = state.readingStates.some((item) => item.segment_id === segment.id);
@@ -589,14 +589,37 @@ function SegmentDetail({
           <div>
             <p className="text-xs font-bold text-[#C8826A]">연구용 성경</p>
             <h2 className="mt-1 text-3xl font-black">{segment.display}</h2>
+            <p className="mt-2 text-sm text-[#8B7088]">읽고 떠오른 생각을 먼저 남겨요.</p>
           </div>
           <a href={segment.jw_url ?? undefined} target="_blank" rel="noreferrer" className="rounded-full bg-white px-4 py-2 text-sm font-bold text-[#8B7088]">
             본문 보기
           </a>
         </div>
 
+        <div className="mb-4 rounded-2xl bg-white p-4">
+          <h3 className="mb-3 font-black">코멘트 남기기</h3>
+          <textarea
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+            placeholder="이 장에서 떠오른 생각을 남겨요"
+            className="min-h-28 w-full rounded-2xl border border-[#F2DCE5] px-4 py-3"
+          />
+          <button
+            onClick={() =>
+              action(async () => {
+                await apiAction("add_comment", { segmentId: segment.id, body: comment });
+                setComment("");
+              })
+            }
+            className="mt-3 rounded-xl px-4 py-2 text-sm font-bold text-white"
+            style={{ background: me.accent_color }}
+          >
+            코멘트 남기기
+          </button>
+        </div>
+
         <div className="rounded-2xl bg-[#FFF8F1] p-4">
-          <h3 className="mb-3 font-black">구절 표시</h3>
+          <h3 className="mb-3 font-black">구절 표시도 남기기</h3>
           {verseCount ? (
             <div className="mb-3 grid grid-cols-6 gap-2 sm:grid-cols-10">
               {Array.from({ length: verseCount }, (_, index) => index + 1).map((verse) => {
@@ -663,20 +686,6 @@ function SegmentDetail({
           </button>
         </div>
       </div>
-
-      <Composer
-        value={comment}
-        onChange={setComment}
-        placeholder="이 장에서 떠오른 생각을 남겨요"
-        button="코멘트 남기기"
-        color={me.accent_color}
-        onSubmit={() =>
-          action(async () => {
-            await apiAction("add_comment", { segmentId: segment.id, body: comment });
-            setComment("");
-          })
-        }
-      />
 
       <div className="space-y-3">
         {highlights.map((highlight) => (
@@ -997,7 +1006,12 @@ function RecordDetail({ state, segment, me, action }: { state: AppState; segment
   return (
     <div className="space-y-5">
       <div className="card rounded-3xl p-5">
-        <h2 className="text-2xl font-black">{segment.display}</h2>
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="text-2xl font-black">{segment.display}</h2>
+          <a href={segment.jw_url ?? undefined} target="_blank" rel="noreferrer" className="rounded-full bg-white px-4 py-2 text-sm font-bold text-[#8B7088]">
+            본문 보기
+          </a>
+        </div>
         <div className="mt-3 space-y-1 text-sm text-[#8B7088]">
           {readStates.length ? (
             readStates.map((item) => {
@@ -1009,7 +1023,101 @@ function RecordDetail({ state, segment, me, action }: { state: AppState; segment
           )}
         </div>
       </div>
-      <SegmentDetail state={state} me={me} segment={segment} action={action} />
+      <ReadOnlySegmentDetail state={state} segment={segment} />
+    </div>
+  );
+}
+
+function ReadOnlySegmentDetail({ state, segment }: { state: AppState; segment: Segment }) {
+  const comments = state.comments.filter((item) => item.segment_id === segment.id);
+  const highlights = state.highlights.filter((item) => item.segment_id === segment.id);
+
+  return (
+    <div className="space-y-3">
+      {comments.map((comment) => {
+        const author = state.profiles.find((profile) => profile.id === comment.profile_id);
+        const replies = state.replies.filter((reply) => reply.parent_type === "comment" && reply.parent_id === comment.id);
+        const reactions = state.reactions.filter((reaction) => reaction.target_type === "comment" && reaction.target_id === comment.id);
+        return (
+          <ReadOnlyEntryCard
+            key={comment.id}
+            title="코멘트"
+            body={comment.body}
+            author={author}
+            createdAt={comment.created_at}
+            replies={replies}
+            reactions={reactions.length}
+            state={state}
+          />
+        );
+      })}
+      {highlights.map((highlight) => {
+        const author = state.profiles.find((profile) => profile.id === highlight.profile_id);
+        const replies = state.replies.filter((reply) => reply.parent_type === "highlight" && reply.parent_id === highlight.id);
+        const reactions = state.reactions.filter((reaction) => reaction.target_type === "highlight" && reaction.target_id === highlight.id);
+        return (
+          <ReadOnlyEntryCard
+            key={highlight.id}
+            title={highlight.verse_ref}
+            body={highlight.note || "표시만 남겼어요"}
+            author={author}
+            createdAt={highlight.created_at}
+            replies={replies}
+            reactions={reactions.length}
+            state={state}
+            tint={highlight.color || "#F4B5C9"}
+          />
+        );
+      })}
+      {comments.length === 0 && highlights.length === 0 && (
+        <div className="card rounded-3xl p-5 text-center text-sm text-[#8B7088]">아직 남긴 기록이 없어요.</div>
+      )}
+    </div>
+  );
+}
+
+function ReadOnlyEntryCard({
+  title,
+  body,
+  author,
+  createdAt,
+  replies,
+  reactions,
+  state,
+  tint,
+}: {
+  title: string;
+  body: string;
+  author?: Profile;
+  createdAt: string;
+  replies: Reply[];
+  reactions: number;
+  state: AppState;
+  tint?: string;
+}) {
+  return (
+    <div className="card rounded-3xl p-5" style={tint ? { borderColor: tint } : undefined}>
+      <p className="text-xs font-bold" style={{ color: author?.accent_color ?? "#8B7088" }}>
+        {author?.display_name ?? "누군가"} · {shortDate(createdAt)}
+      </p>
+      <h3 className="mt-1 font-black">{title}</h3>
+      <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{body}</p>
+      {reactions > 0 && <p className="mt-3 text-xs text-[#8B7088]">하트 {reactions}개</p>}
+      {replies.length > 0 && (
+        <div className="mt-4 space-y-2 border-l-2 border-[#F2DCE5] pl-3">
+          {replies.map((reply) => {
+            const replyAuthor = state.profiles.find((profile) => profile.id === reply.profile_id);
+            return (
+              <div key={reply.id} className="rounded-2xl bg-[#FFF8F1] p-3 text-sm">
+                <p className="mb-1 text-xs font-bold" style={{ color: replyAuthor?.accent_color ?? "#8B7088" }}>
+                  {replyAuthor?.display_name} · {shortDate(reply.created_at)}
+                </p>
+                {reply.body}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -13,7 +13,7 @@ export const supabaseAdmin = createClient(supabaseUrl, secretKey, {
   },
 });
 
-export const WOL_BASE = "https://wol.jw.org/ko/wol/binav/r8/lp-ko/nwtsty";
+export const WOL_BASE = "https://wol.jw.org/ko/wol/b/r8/lp-ko/nwtsty";
 
 export function wolChapterUrl(bookNumber: number, chapter: number) {
   return `${WOL_BASE}/${bookNumber}/${chapter}`;
