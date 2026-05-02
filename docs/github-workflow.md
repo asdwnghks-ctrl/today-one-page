@@ -7,6 +7,7 @@ Code changes should be easy to save and push to GitHub.
 ## Current Setup
 
 - Local Git repository uses `main`.
+- Remote repository is `https://github.com/asdwnghks-ctrl/today-one-page.git`.
 - Git hooks are stored in `.githooks`.
 - `.githooks/post-commit` automatically pushes the current branch to `origin` after every successful commit.
 
@@ -33,4 +34,3 @@ git push -u origin main
 ```
 
 After that, future commits will push automatically.
-
