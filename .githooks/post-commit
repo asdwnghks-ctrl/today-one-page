@@ -1,0 +1,11 @@
+#!/bin/sh
+
+branch="$(git branch --show-current)"
+
+if [ -z "$branch" ]; then
+  exit 0
+fi
+
+if git remote get-url origin >/dev/null 2>&1; then
+  git push origin "$branch"
+fi
