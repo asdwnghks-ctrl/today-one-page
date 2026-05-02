@@ -43,6 +43,15 @@ MVP는 **Vercel + Supabase만으로 충분하다.**
 - 읽음 상태
 - 나중에 이미지가 필요해지면 Storage
 
+현재 Supabase 상태:
+
+- CLI: `npx supabase`
+- Local config: `supabase/config.toml`
+- Remote project: 아직 연결 전
+- 필요한 다음 값: Supabase access token, project ref, database password
+
+Supabase CLI 자동 로그인은 비대화형 터미널에서 막히므로, Dashboard에서 access token을 만든 뒤 CLI에 전달해야 한다.
+
 ## Vercel이 맡는 것
 
 - Next.js 앱 배포
