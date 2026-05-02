@@ -50,6 +50,28 @@ MVP는 **Vercel + Supabase만으로 충분하다.**
 - 환경 변수 관리
 - 자동 배포
 
+현재 Vercel 프로젝트:
+
+- Project: `today-one-page`
+- GitHub: `https://github.com/asdwnghks-ctrl/today-one-page`
+- Root Directory: `.`
+- Node.js: `24.x`
+- 현재 Framework Preset: `Other`
+
+아직 실제 Next.js 앱이 없어서 Vercel은 `Other` 프로젝트로 연결되어 있다. Next.js 앱을 scaffold한 뒤에는 Vercel이 Next.js 프로젝트로 빌드하도록 설정을 맞춘다.
+
+## 자동 배포 흐름
+
+로컬에서 커밋하면 Git hook이 자동으로 GitHub에 push한다. Vercel은 GitHub 저장소와 연결되어 있으므로, `main` 브랜치에 push가 들어가면 자동 배포를 실행한다.
+
+흐름:
+
+```text
+local commit -> auto git push -> GitHub main -> Vercel deployment
+```
+
+주의: 현재는 앱 진입점이 없어서 Vercel에 연결은 되어 있지만 실제 서비스 화면은 아직 없다. Next.js 앱을 만든 뒤부터 배포 결과가 의미 있게 보인다.
+
 ## 실시간 채팅 방식
 
 채팅 메시지는 Supabase Postgres의 `messages` 테이블에 저장한다. 새 메시지가 insert되면 Supabase Realtime subscription으로 상대 화면에 즉시 반영한다.
@@ -107,4 +129,3 @@ MVP 추천은 **Supabase Auth를 내부적으로 쓰되, 화면은 이름 선택
 - 너무 새로운 프레임워크
 - 처음부터 과한 상태관리 라이브러리
 - MVP부터 푸시 알림, 이미지 업로드, 음성 메시지까지 넣기
-
