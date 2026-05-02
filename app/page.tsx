@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bell,
   BookOpen,
@@ -26,6 +26,7 @@ import type {
   Segment,
   SegmentComment,
 } from "@/lib/types";
+import { supabaseBrowser } from "@/lib/supabase-browser";
 
 type Tab = "today" | "reading" | "chat" | "records";
 
@@ -91,6 +92,9 @@ export default function Page() {
   const [selectedBookId, setSelectedBookId] = useState<string>("ecc");
   const [chatOpen, setChatOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [onlineProfileIds, setOnlineProfileIds] = useState<string[]>([]);
+  const [realtimeStatus, setRealtimeStatus] = useState("CLOSED");
+  const broadcastChangeRef = useRef<(() => void) | null>(null);
 
   const fetchState = useCallback(async () => {
     const response = await fetch("/api/state", { cache: "no-store" });
@@ -109,11 +113,61 @@ export default function Page() {
 
   useEffect(() => {
     if (!state?.me) return;
-    const timer = window.setInterval(() => {
-      fetchState().catch(() => undefined);
-    }, 4500);
-    return () => window.clearInterval(timer);
-  }, [fetchState, state?.me]);
+
+    let refreshTimer: number | null = null;
+    const channel = supabaseBrowser.channel("today-one-page-live", {
+      config: {
+        presence: {
+          key: state.me.id,
+        },
+      },
+    });
+
+    const scheduleRefresh = () => {
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        fetchState().catch(() => undefined);
+      }, 180);
+    };
+
+    channel
+      .on("broadcast", { event: "state_changed" }, scheduleRefresh)
+      .on("presence", { event: "sync" }, () => {
+        const presence = channel.presenceState() as Record<string, Array<{ profileId?: string }>>;
+        const ids = Object.values(presence)
+          .flat()
+          .map((item) => item.profileId)
+          .filter((id): id is string => Boolean(id));
+        setOnlineProfileIds(Array.from(new Set(ids)));
+      })
+      .subscribe((status) => {
+        setRealtimeStatus(status);
+        if (status === "SUBSCRIBED") {
+          void channel.track({
+            profileId: state.me?.id,
+            displayName: state.me?.display_name,
+            onlineAt: new Date().toISOString(),
+          });
+        }
+      });
+
+    broadcastChangeRef.current = () => {
+      void channel.send({
+        type: "broadcast",
+        event: "state_changed",
+        payload: {
+          actorId: state.me?.id,
+          at: Date.now(),
+        },
+      });
+    };
+
+    return () => {
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      broadcastChangeRef.current = null;
+      void supabaseBrowser.removeChannel(channel);
+    };
+  }, [fetchState, state?.me?.display_name, state?.me?.id]);
 
   const me = state?.me ?? null;
   const profiles = state?.profiles?.length ? state.profiles : (FALLBACK_PEOPLE as Profile[]);
@@ -133,6 +187,7 @@ export default function Page() {
     try {
       await action();
       await fetchState();
+      broadcastChangeRef.current?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "요청을 처리하지 못했어요");
     }
@@ -296,7 +351,7 @@ export default function Page() {
               action={refreshAfter}
             />
           )}
-          {tab === "chat" && <ChatView state={appState} me={me} action={refreshAfter} />}
+          {tab === "chat" && <ChatView state={appState} me={me} action={refreshAfter} onlineProfileIds={onlineProfileIds} />}
           {tab === "records" && (
             <RecordsView
               state={appState}
@@ -326,7 +381,7 @@ export default function Page() {
 
       {chatOpen && (
         <Drawer title="둘만의 대화" onClose={() => setChatOpen(false)}>
-          <ChatView state={appState} me={me} action={refreshAfter} compact />
+          <ChatView state={appState} me={me} action={refreshAfter} onlineProfileIds={onlineProfileIds} compact />
         </Drawer>
       )}
 
@@ -346,6 +401,9 @@ export default function Page() {
           />
         </Drawer>
       )}
+      <div className="fixed bottom-[78px] right-4 z-20 rounded-full bg-white/80 px-3 py-1 text-[11px] text-[#8B7088] shadow-sm">
+        Realtime {realtimeStatus === "SUBSCRIBED" ? "연결됨" : "연결 중"}
+      </div>
     </main>
   );
 }
@@ -793,17 +851,37 @@ function EntryCard({
   );
 }
 
-function ChatView({ state, me, action, compact }: { state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void>; compact?: boolean }) {
+function ChatView({
+  state,
+  me,
+  action,
+  onlineProfileIds = [],
+  compact,
+}: {
+  state: AppState;
+  me: Profile;
+  action: (fn: () => Promise<unknown>) => Promise<void>;
+  onlineProfileIds?: string[];
+  compact?: boolean;
+}) {
   const [message, setMessage] = useState("");
   useEffect(() => {
     void action(() => apiAction("mark_messages_read"));
   }, []);
-  const readByMe = new Set(state.messageReads.filter((item) => item.profile_id === me.id).map((item) => item.message_id));
+  const other = state.profiles.find((profile) => profile.id !== me.id);
+  const otherOnline = other ? onlineProfileIds.includes(other.id) : false;
+  const readByOther = new Set(
+    state.messageReads
+      .filter((item) => item.profile_id !== me.id)
+      .map((item) => item.message_id),
+  );
   return (
     <div className={`card flex ${compact ? "h-[calc(100vh-120px)]" : "min-h-[70vh]"} flex-col rounded-3xl`}>
       <div className="border-b border-[#F2DCE5] p-4">
         <h2 className="text-lg font-black">둘만의 대화</h2>
-        <p className="text-xs text-[#8B7088]">답장은 천천히 와도 괜찮아요.</p>
+        <p className="text-xs text-[#8B7088]">
+          {otherOnline ? `${other?.display_name ?? "상대"}와 함께 있는 중` : "답장은 천천히 와도 괜찮아요."}
+        </p>
       </div>
       <div className="flex-1 space-y-3 overflow-auto p-4">
         {state.messages.filter((item) => !item.deleted_at).map((item) => {
@@ -816,7 +894,7 @@ function ChatView({ state, me, action, compact }: { state: AppState; me: Profile
                 <p className="whitespace-pre-wrap">{item.body}</p>
                 <div className={`mt-1 flex items-center justify-between gap-3 text-[11px] ${mine ? "text-white/75" : "text-[#A89AA0]"}`}>
                   <span>{shortDate(item.created_at)} {item.edited_at && "· 수정됨"}</span>
-                  {mine && <span>{readByMe.has(item.id) ? "" : ""}</span>}
+                  {mine && readByOther.has(item.id) && <span>읽음</span>}
                   {mine && <MessageTools item={item} action={action} />}
                 </div>
               </div>
