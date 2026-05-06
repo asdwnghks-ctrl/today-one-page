@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { advanceAfterDailyResetIfDue } from "@/lib/reading-progress";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
 export async function GET() {
@@ -37,6 +38,8 @@ export async function GET() {
       verseCounts: [],
     });
   }
+
+  await advanceAfterDailyResetIfDue();
 
   const [
     sectionsRes,

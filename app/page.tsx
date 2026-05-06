@@ -427,6 +427,7 @@ function TodayView({
 }) {
   const myRead = state.readingStates.some((item) => item.segment_id === segment.id && item.profile_id === me.id);
   const otherRead = other ? state.readingStates.some((item) => item.segment_id === segment.id && item.profile_id === other.id) : false;
+  const bothRead = myRead && otherRead;
   const comments = state.comments.filter((item) => item.segment_id === segment.id);
   const highlights = state.highlights.filter((item) => item.segment_id === segment.id);
 
@@ -437,7 +438,9 @@ function TodayView({
         <h2 className="mt-2 text-4xl font-black">
           <span style={{ color: me.accent_color }}>{segment.book_name}</span> {segment.chapter}장
         </h2>
-        <p className="mt-2 text-sm text-[#8B7088]">여유 있을 때 천천히, 함께.</p>
+        <p className="mt-2 text-sm text-[#8B7088]">
+          {bothRead ? "오늘은 둘 다 읽었어요. 새벽 2시에 다음 범위가 열려요." : "여유 있을 때 천천히, 함께."}
+        </p>
         <div className="mt-6 grid gap-3 sm:grid-cols-2">
           <a
             href={segment.jw_url ?? undefined}
@@ -874,9 +877,19 @@ function ChatView({
   compact?: boolean;
 }) {
   const [message, setMessage] = useState("");
+  const messagesRef = useRef<HTMLDivElement | null>(null);
+  const visibleMessages = useMemo(() => state.messages.filter((item) => !item.deleted_at), [state.messages]);
+
   useEffect(() => {
     void action(() => apiAction("mark_messages_read"));
   }, []);
+
+  useEffect(() => {
+    const messagesEl = messagesRef.current;
+    if (!messagesEl) return;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }, [visibleMessages.length]);
+
   const other = state.profiles.find((profile) => profile.id !== me.id);
   const otherOnline = other ? onlineProfileIds.includes(other.id) : false;
   const readByOther = new Set(
@@ -892,8 +905,8 @@ function ChatView({
           {otherOnline ? `${other?.display_name ?? "상대"}와 함께 있는 중` : "답장은 천천히 와도 괜찮아요."}
         </p>
       </div>
-      <div className="flex-1 space-y-3 overflow-auto p-4">
-        {state.messages.filter((item) => !item.deleted_at).map((item) => {
+      <div ref={messagesRef} className="flex-1 space-y-3 overflow-auto p-4">
+        {visibleMessages.map((item) => {
           const mine = item.sender_id === me.id;
           const author = state.profiles.find((profile) => profile.id === item.sender_id);
           return (

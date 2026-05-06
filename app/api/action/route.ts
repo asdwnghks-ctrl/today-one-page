@@ -56,61 +56,6 @@ async function getCurrentProgress() {
   return data;
 }
 
-async function maybeAdvanceAfterRead(segmentId: string) {
-  const progress = await getCurrentProgress();
-  if (progress.current_segment_id !== segmentId) return;
-
-  const { data: profiles, error: profileError } = await supabaseAdmin.from("profiles").select("id");
-  if (profileError) throw profileError;
-
-  const { data: states, error: statesError } = await supabaseAdmin
-    .from("reading_states")
-    .select("profile_id")
-    .eq("segment_id", segmentId)
-    .not("checked_at", "is", null);
-  if (statesError) throw statesError;
-
-  const checked = new Set((states ?? []).map((state) => state.profile_id));
-  if (!profiles?.every((profile) => checked.has(profile.id))) return;
-
-  const { data: currentSegment, error: segmentError } = await supabaseAdmin
-    .from("segments")
-    .select("*")
-    .eq("id", segmentId)
-    .single();
-  if (segmentError) throw segmentError;
-
-  const { data: nextSegment, error: nextError } = await supabaseAdmin
-    .from("segments")
-    .select("*")
-    .eq("book_id", currentSegment.book_id)
-    .eq("chapter", currentSegment.chapter + 1)
-    .maybeSingle();
-  if (nextError) throw nextError;
-
-  if (nextSegment) {
-    const { error } = await supabaseAdmin
-      .from("reading_progress")
-      .update({
-        current_segment_id: nextSegment.id,
-        status: "reading",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", progress.id);
-    if (error) throw error;
-  } else {
-    const { error } = await supabaseAdmin
-      .from("reading_progress")
-      .update({
-        status: "choosing_book",
-        completed_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", progress.id);
-    if (error) throw error;
-  }
-}
-
 async function verifyOwner(table: string, id: string, profileId: string, ownerColumn = "profile_id") {
   const { data, error } = await supabaseAdmin.from(table).select(`${ownerColumn}`).eq("id", id).single();
   const row = data as Record<string, string> | null;
@@ -141,7 +86,6 @@ export async function POST(request: NextRequest) {
         );
         if (error) throw error;
         await notifyOthers(actor, "reading_checked", `${actor.display_name}이 읽었어요`, "같이 읽던 장에 읽음 체크가 되었어요.", "segment", segmentId);
-        await maybeAdvanceAfterRead(segmentId);
         break;
       }
 
