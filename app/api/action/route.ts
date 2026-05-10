@@ -301,10 +301,25 @@ export async function POST(request: NextRequest) {
         if (updateProposalError) throw updateProposalError;
         const { error: progressError } = await supabaseAdmin
           .from("reading_progress")
-          .update({ current_book_id: proposal.proposed_book_id, current_segment_id: (firstSegment as Segment).id, status: "reading", started_at: now, completed_at: null, updated_at: now })
+          .update({ current_book_id: proposal.proposed_book_id, current_segment_id: (firstSegment as Segment).id, status: "reading", started_at: now, completed_at: null, updated_at: now, session_id: crypto.randomUUID() })
           .eq("id", progress.id);
         if (progressError) throw progressError;
         await notifyOthers(actor, "book_accepted", `${actor.display_name}이 다음 책을 수락했어요`, "새 책의 1장이 열렸어요.", "segment", (firstSegment as Segment).id);
+        break;
+      }
+
+      case "set_gift": {
+        const giftDescription = asString(payload.giftDescription);
+        if (!giftDescription) throw new Error("선물 내용을 입력해 주세요");
+        const progress = await getCurrentProgress();
+        if (!progress.session_id) throw new Error("진행 중인 책이 없어요");
+        const { error } = await supabaseAdmin
+          .from("book_gifts")
+          .upsert(
+            { session_id: progress.session_id, profile_id: actor.id, gift_description: giftDescription },
+            { onConflict: "session_id,profile_id" },
+          );
+        if (error) throw error;
         break;
       }
 

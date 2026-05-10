@@ -36,6 +36,10 @@ export async function GET() {
       notifications: [],
       proposals: [],
       verseCounts: [],
+      missCounts: {},
+      myGift: null,
+      partnerHasGift: false,
+      revealedGifts: [],
     });
   }
 
@@ -71,6 +75,37 @@ export async function GET() {
     supabaseAdmin.from("verse_counts").select("book_id,chapter,verse_count"),
   ]);
 
+  const progress = progressRes.data ?? null;
+
+  // miss counts (현재 책 session 기준)
+  let missCounts: Record<string, number> = {};
+  let myGift = null;
+  let partnerHasGift = false;
+  let revealedGifts: unknown[] = [];
+
+  if (progress?.session_id) {
+    const [missesRes, giftsRes] = await Promise.all([
+      supabaseAdmin
+        .from("reading_misses")
+        .select("profile_id")
+        .in("profile_id", (profilesRes.data ?? []).map((p) => p.id)),
+      supabaseAdmin
+        .from("book_gifts")
+        .select("id,session_id,profile_id,gift_description,is_revealed,revealed_at,created_at")
+        .eq("session_id", progress.session_id),
+    ]);
+
+    for (const profile of profilesRes.data ?? []) missCounts[profile.id] = 0;
+    for (const miss of missesRes.data ?? []) {
+      missCounts[miss.profile_id] = (missCounts[miss.profile_id] ?? 0) + 1;
+    }
+
+    const gifts = giftsRes.data ?? [];
+    myGift = gifts.find((g) => g.profile_id === me.id && !g.is_revealed) ?? null;
+    partnerHasGift = gifts.some((g) => g.profile_id !== me.id && !g.is_revealed);
+    revealedGifts = gifts.filter((g) => g.is_revealed);
+  }
+
   const errors = [
     sectionsRes.error,
     booksRes.error,
@@ -105,7 +140,7 @@ export async function GET() {
     sections: sectionsRes.data ?? [],
     books: booksRes.data ?? [],
     segments: segmentsRes.data ?? [],
-    progress: progressRes.data ?? null,
+    progress,
     readingStates: statesRes.data ?? [],
     highlights: highlightsRes.data ?? [],
     comments: commentsRes.data ?? [],
@@ -116,5 +151,9 @@ export async function GET() {
     notifications,
     proposals: proposalsRes.data ?? [],
     verseCounts: verseCountsRes.data ?? [],
+    missCounts,
+    myGift,
+    partnerHasGift,
+    revealedGifts,
   });
 }

@@ -19,6 +19,7 @@ import {
 import type {
   AppState,
   Book,
+  BookGift,
   Highlight,
   Message,
   Profile,
@@ -338,6 +339,7 @@ export default function Page() {
                 setSelectedSegmentId(id);
                 setTab("reading");
               }}
+              action={refreshAfter}
             />
           )}
           {tab === "reading" && activeSegment && (
@@ -408,6 +410,120 @@ export default function Page() {
   );
 }
 
+function MissScoreboard({ state, me, other }: { state: AppState; me: Profile; other: Profile | null }) {
+  const myCount = state.missCounts[me.id] ?? 0;
+  const otherCount = other ? (state.missCounts[other.id] ?? 0) : 0;
+  if (myCount === 0 && otherCount === 0) return null;
+
+  const myLosing = myCount > otherCount;
+  const otherLosing = other && otherCount > myCount;
+
+  return (
+    <div className="card rounded-3xl p-4">
+      <h3 className="mb-3 text-sm font-black text-[#8B7088]">이번 책 못 읽기 점수</h3>
+      <div className="flex items-center justify-around gap-4">
+        <div className={`text-center ${myLosing ? "opacity-100" : "opacity-60"}`}>
+          <p className="text-xs font-bold" style={{ color: me.accent_color }}>{me.display_name}</p>
+          <p className="mt-1 text-2xl font-black">{myCount}<span className="text-sm">번</span></p>
+          {myLosing && <p className="text-xs text-[#A93F62]">😅 지고 있어요</p>}
+        </div>
+        <div className="text-sm text-[#C8B5E8]">vs</div>
+        {other && (
+          <div className={`text-center ${otherLosing ? "opacity-100" : "opacity-60"}`}>
+            <p className="text-xs font-bold" style={{ color: other.accent_color }}>{other.display_name}</p>
+            <p className="mt-1 text-2xl font-black">{otherCount}<span className="text-sm">번</span></p>
+            {otherLosing && <p className="text-xs text-[#A93F62]">😅 지고 있어요</p>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GiftSetupCard({ state, me, other, action }: { state: AppState; me: Profile; other: Profile | null; action: (fn: () => Promise<unknown>) => Promise<void> }) {
+  const [giftText, setGiftText] = useState("");
+  const [editing, setEditing] = useState(false);
+
+  const myGift: BookGift | null = state.myGift ?? null;
+  const partnerHasGift: boolean = state.partnerHasGift ?? false;
+
+  if (myGift && !editing) {
+    return (
+      <div className="card rounded-3xl p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs font-bold text-[#8B7088]">내가 설정한 선물 🎁</p>
+            <p className="mt-1 text-sm font-bold">{myGift.gift_description}</p>
+            <p className="mt-1 text-xs text-[#A89AA0]">{other?.display_name}은(는) 못 봐요</p>
+          </div>
+          <button onClick={() => { setGiftText(myGift.gift_description); setEditing(true); }} className="text-xs text-[#8B7088] underline">수정</button>
+        </div>
+        {partnerHasGift && <p className="mt-3 text-xs text-[#A93F62]">상대방도 선물을 설정했어요 🤫</p>}
+      </div>
+    );
+  }
+
+  if (!editing && !myGift) {
+    return (
+      <div className="card rounded-3xl p-4">
+        <p className="text-sm font-black">선물 설정 🎁</p>
+        <p className="mt-1 text-xs text-[#8B7088]">이번 책에서 지면 줄 선물을 몰래 정해봐요. {other?.display_name}은(는) 책이 끝날 때까지 못 봐요.</p>
+        {partnerHasGift && <p className="mt-2 text-xs text-[#A93F62]">상대방이 이미 선물을 설정했어요 🤫</p>}
+        <button onClick={() => setEditing(true)} className="mt-3 rounded-xl px-4 py-2 text-sm font-bold text-white" style={{ background: me.accent_color }}>
+          선물 정하기
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card rounded-3xl p-4">
+      <p className="mb-2 text-sm font-black">선물 입력 🎁</p>
+      <input
+        value={giftText}
+        onChange={(e) => setGiftText(e.target.value)}
+        placeholder="예: 맛있는 케이크 사주기"
+        className="w-full rounded-xl border border-[#F2DCE5] px-3 py-2 text-sm"
+        autoFocus
+      />
+      <div className="mt-2 flex gap-2">
+        <button
+          onClick={() => action(async () => { await apiAction("set_gift", { giftDescription: giftText }); setEditing(false); setGiftText(""); })}
+          className="rounded-xl px-4 py-2 text-sm font-bold text-white"
+          style={{ background: me.accent_color }}
+        >
+          저장
+        </button>
+        <button onClick={() => { setEditing(false); setGiftText(""); }} className="rounded-xl px-4 py-2 text-sm text-[#8B7088]">취소</button>
+      </div>
+    </div>
+  );
+}
+
+function RevealedGiftsCard({ state }: { state: AppState }) {
+  const gifts: BookGift[] = state.revealedGifts ?? [];
+  if (!gifts.length) return null;
+
+  return (
+    <div className="card rounded-3xl p-5 border-2 border-[#F4B5C9]">
+      <p className="mb-3 text-lg font-black">🎁 선물 공개!</p>
+      {gifts.map((gift) => {
+        const profile = state.profiles.find((p) => p.id === gift.profile_id);
+        const missCount = state.missCounts[gift.profile_id] ?? 0;
+        const otherCounts = Object.entries(state.missCounts).filter(([id]) => id !== gift.profile_id).map(([, c]) => c);
+        const isLoser = otherCounts.every((c) => missCount >= c);
+        return (
+          <div key={gift.id} className="mb-3 rounded-2xl bg-[#FFF8F1] p-3">
+            <p className="text-xs font-bold" style={{ color: profile?.accent_color }}>{profile?.display_name}</p>
+            {isLoser && <p className="text-xs text-[#8B7088]">이번 책에서 {missCount}번 못 읽었어요 😅</p>}
+            <p className="mt-1 font-bold">선물: {gift.gift_description}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function TodayView({
   state,
   me,
@@ -416,6 +532,7 @@ function TodayView({
   book,
   onRead,
   onOpenSegment,
+  action,
 }: {
   state: AppState;
   me: Profile;
@@ -424,6 +541,7 @@ function TodayView({
   book: Book | null;
   onRead: () => void;
   onOpenSegment: (id: string) => void;
+  action: (fn: () => Promise<unknown>) => Promise<void>;
 }) {
   const myRead = state.readingStates.some((item) => item.segment_id === segment.id && item.profile_id === me.id);
   const otherRead = other ? state.readingStates.some((item) => item.segment_id === segment.id && item.profile_id === other.id) : false;
@@ -433,6 +551,8 @@ function TodayView({
 
   return (
     <div className="space-y-5">
+      <RevealedGiftsCard state={state} />
+
       <div className="card rounded-3xl p-6">
         <p className="text-sm text-[#8B7088]">오늘은</p>
         <h2 className="mt-2 text-4xl font-black">
@@ -466,6 +586,9 @@ function TodayView({
         <ReadChip profile={me} done={myRead} />
         {other && <ReadChip profile={other} done={otherRead} />}
       </div>
+
+      <MissScoreboard state={state} me={me} other={other} />
+      <GiftSetupCard state={state} me={me} other={other} action={action} />
 
       <div className="card rounded-3xl p-5">
         <div className="mb-4 flex items-center justify-between">

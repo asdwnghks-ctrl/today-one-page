@@ -46,6 +46,24 @@ export type ReadingProgress = {
   started_at: string;
   completed_at: string | null;
   updated_at: string;
+  session_id: string;
+};
+
+export type ReadingMiss = {
+  id: string;
+  segment_id: string;
+  profile_id: string;
+  book_id: string;
+  missed_boundary: string;
+};
+
+export type BookGift = {
+  id: string;
+  session_id: string;
+  profile_id: string;
+  gift_description: string;
+  is_revealed: boolean;
+  revealed_at: string | null;
 };
 
 export type ReadingState = {
@@ -160,4 +178,8 @@ export type AppState = {
   notifications: Notification[];
   proposals: BookProposal[];
   verseCounts: VerseCount[];
+  missCounts: Record<string, number>;
+  myGift: BookGift | null;
+  partnerHasGift: boolean;
+  revealedGifts: BookGift[];
 };
