@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import {
   Bell,
   BookOpen,
@@ -1150,6 +1151,12 @@ function ChatView({
   const visibleMessages = useMemo(() => [...state.messages.filter((item) => !item.deleted_at), ...pendingMessages], [pendingMessages, state.messages]);
   const latestMessageId = visibleMessages[visibleMessages.length - 1]?.id;
 
+  function scrollMessagesToLatest() {
+    const messagesEl = messagesRef.current;
+    if (!messagesEl) return;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
   async function sendCurrentMessage() {
     if (!onSendMessage || sendingRef.current || composingRef.current) return;
     const body = message.trim();
@@ -1165,9 +1172,13 @@ function ChatView({
     };
 
     sendingRef.current = true;
-    setSending(true);
-    setMessage("");
-    setPendingMessages((prev) => [...prev, optimisticMessage]);
+    flushSync(() => {
+      setSending(true);
+      setMessage("");
+      setPendingMessages((prev) => [...prev, optimisticMessage]);
+    });
+    scrollMessagesToLatest();
+    window.requestAnimationFrame(scrollMessagesToLatest);
 
     const sent = await onSendMessage(body);
     setPendingMessages((prev) => prev.filter((item) => item.id !== optimisticMessage.id));
@@ -1179,13 +1190,8 @@ function ChatView({
   }
 
   useLayoutEffect(() => {
-    const messagesEl = messagesRef.current;
-    if (!messagesEl) return;
-    const scrollToLatest = () => {
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    };
-    scrollToLatest();
-    const frame = window.requestAnimationFrame(scrollToLatest);
+    scrollMessagesToLatest();
+    const frame = window.requestAnimationFrame(scrollMessagesToLatest);
     return () => window.cancelAnimationFrame(frame);
   }, [latestMessageId, visibleMessages.length, compact]);
 
