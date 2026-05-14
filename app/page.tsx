@@ -1145,7 +1145,6 @@ function ChatView({
   const [message, setMessage] = useState("");
   const [pendingMessages, setPendingMessages] = useState<Message[]>([]);
   const messagesRef = useRef<HTMLDivElement | null>(null);
-  const submittedMessageKeysRef = useRef(new Set<string>());
   const composingRef = useRef(false);
   const visibleMessages = useMemo(() => [...state.messages.filter((item) => !item.deleted_at), ...pendingMessages], [pendingMessages, state.messages]);
   const latestMessageId = visibleMessages[visibleMessages.length - 1]?.id;
@@ -1160,8 +1159,6 @@ function ChatView({
     if (!onSendMessage || composingRef.current) return;
     const body = message.trim();
     if (!body) return;
-    const dedupeKey = `${me.id}:${body}`;
-    if (submittedMessageKeysRef.current.has(dedupeKey)) return;
 
     const optimisticMessage: Message = {
       id: `pending-${Date.now()}`,
@@ -1172,7 +1169,6 @@ function ChatView({
       deleted_at: null,
     };
 
-    submittedMessageKeysRef.current.add(dedupeKey);
     flushSync(() => {
       setMessage("");
       setPendingMessages((prev) => [...prev, optimisticMessage]);
@@ -1185,7 +1181,6 @@ function ChatView({
     if (!sent) {
       setMessage((current) => current || body);
     }
-    submittedMessageKeysRef.current.delete(dedupeKey);
   }
 
   useLayoutEffect(() => {
