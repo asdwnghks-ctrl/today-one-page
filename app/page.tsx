@@ -187,6 +187,42 @@ export default function Page() {
     return state.messages.filter((message) => message.sender_id !== state.me?.id && !message.deleted_at && !read.has(message.id)).length;
   }, [state]);
 
+  const quietlyMarkMessagesRead = useCallback(async () => {
+    if (!state?.me || notificationMarkingRef.current) return;
+    const read = new Set(state.messageReads.filter((item) => item.profile_id === state.me?.id).map((item) => item.message_id));
+    const hasUnreadMessages = state.messages.some((message) => message.sender_id !== state.me?.id && !message.deleted_at && !read.has(message.id));
+    const hasUnreadMessageNotifications = state.notifications.some((item) => !item.read_at && item.type === "message");
+    if (!hasUnreadMessages && !hasUnreadMessageNotifications) return;
+
+    notificationMarkingRef.current = true;
+    const readAt = new Date().toISOString();
+    setState((prev) =>
+      prev
+        ? {
+            ...prev,
+            messageReads: [
+              ...prev.messageReads,
+              ...prev.messages
+                .filter((message) => message.sender_id !== prev.me?.id && !message.deleted_at)
+                .filter((message) => !prev.messageReads.some((item) => item.profile_id === prev.me?.id && item.message_id === message.id))
+                .map((message) => ({ id: `local-${message.id}`, message_id: message.id, profile_id: prev.me?.id ?? "", read_at: readAt })),
+            ],
+            notifications: prev.notifications.map((item) =>
+              !item.read_at && item.type === "message" ? { ...item, read_at: readAt } : item,
+            ),
+          }
+        : prev,
+    );
+    try {
+      await apiAction("mark_messages_read");
+      await fetchState();
+    } catch {
+      fetchState().catch(() => undefined);
+    } finally {
+      notificationMarkingRef.current = false;
+    }
+  }, [fetchState, state?.me, state?.messageReads, state?.messages, state?.notifications]);
+
   const quietlyMarkNotificationsRead = useCallback(
     async (types: string[]) => {
       if (!state?.me || notificationMarkingRef.current) return;
@@ -221,6 +257,11 @@ export default function Page() {
     if (tab !== "reading") return;
     void quietlyMarkNotificationsRead(["comment", "reply"]);
   }, [quietlyMarkNotificationsRead, tab]);
+
+  useEffect(() => {
+    if (tab !== "chat" && !chatOpen) return;
+    void quietlyMarkMessagesRead();
+  }, [chatOpen, quietlyMarkMessagesRead, tab]);
 
   async function runWithPending(action: () => Promise<void>) {
     if (actionPendingRef.current) return;
@@ -1070,7 +1111,7 @@ function ChatView({
 }: {
   state: AppState;
   me: Profile;
-  action: (fn: () => Promise<unknown>) => Promise<void>;
+  action?: (fn: () => Promise<unknown>) => Promise<void>;
   onlineProfileIds?: string[];
   compact?: boolean;
 }) {
@@ -1078,10 +1119,6 @@ function ChatView({
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const visibleMessages = useMemo(() => state.messages.filter((item) => !item.deleted_at), [state.messages]);
   const latestMessageId = visibleMessages[visibleMessages.length - 1]?.id;
-
-  useEffect(() => {
-    void action(() => apiAction("mark_messages_read"));
-  }, []);
 
   useLayoutEffect(() => {
     const messagesEl = messagesRef.current;
@@ -1121,7 +1158,7 @@ function ChatView({
                 <div className={`mt-1 flex items-center justify-between gap-3 text-[11px] ${mine ? "text-white/75" : "text-[#A89AA0]"}`}>
                   <span>{shortDate(item.created_at)} {item.edited_at && "· 수정됨"}</span>
                   {mine && readByOther.has(item.id) && <span>읽음</span>}
-                  {mine && <MessageTools item={item} action={action} />}
+                  {mine && action && <MessageTools item={item} action={action} />}
                 </div>
               </div>
             </div>
@@ -1131,7 +1168,7 @@ function ChatView({
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          if (!message.trim()) return;
+          if (!message.trim() || !action) return;
           void action(async () => {
             await apiAction("send_message", { body: message });
             setMessage("");
