@@ -3,6 +3,18 @@ import { supabaseAdmin } from "@/lib/supabase-admin";
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+type ProgressForAdvance = {
+  id: string;
+  current_segment_id: string;
+  session_id: string;
+  updated_at?: string;
+};
+
+type AcceptedProposal = {
+  id: string;
+  proposed_book_id: string;
+};
+
 export function getKstResetBoundary(now = new Date()) {
   const kstNow = new Date(now.getTime() + KST_OFFSET_MS);
   const boundaryMs =
@@ -15,6 +27,7 @@ async function revealGiftsForSession(sessionId: string, profileIds: string[]) {
   const { data: misses, error: missError } = await supabaseAdmin
     .from("reading_misses")
     .select("profile_id")
+    .eq("session_id", sessionId)
     .in("profile_id", profileIds);
   if (missError) throw missError;
 
@@ -34,7 +47,59 @@ async function revealGiftsForSession(sessionId: string, profileIds: string[]) {
   if (error) throw error;
 }
 
-async function advanceProgress(progress: { id: string; current_segment_id: string; session_id: string }, segmentId: string) {
+async function getFirstSegment(bookId: string) {
+  const { data: firstSegment, error } = await supabaseAdmin
+    .from("segments")
+    .select("*")
+    .eq("book_id", bookId)
+    .eq("chapter", 1)
+    .single();
+  if (error) throw error;
+  return firstSegment;
+}
+
+export async function startAcceptedProposal(
+  progress: { id: string },
+  proposal: AcceptedProposal,
+  now = new Date().toISOString(),
+) {
+  const firstSegment = await getFirstSegment(proposal.proposed_book_id);
+  const { error: progressError } = await supabaseAdmin
+    .from("reading_progress")
+    .update({
+      current_book_id: proposal.proposed_book_id,
+      current_segment_id: firstSegment.id,
+      status: "reading",
+      started_at: now,
+      completed_at: null,
+      updated_at: now,
+      session_id: crypto.randomUUID(),
+    })
+    .eq("id", progress.id);
+  if (progressError) throw progressError;
+
+  const { error: proposalError } = await supabaseAdmin
+    .from("book_proposals")
+    .update({ status: "started" })
+    .eq("id", proposal.id);
+  if (proposalError) throw proposalError;
+
+  return firstSegment;
+}
+
+async function getAcceptedProposal() {
+  const { data, error } = await supabaseAdmin
+    .from("book_proposals")
+    .select("id,proposed_book_id")
+    .eq("status", "accepted")
+    .order("accepted_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data as AcceptedProposal | null;
+}
+
+async function advanceProgress(progress: ProgressForAdvance, segmentId: string) {
   const { data: currentSegment, error: segmentError } = await supabaseAdmin
     .from("segments")
     .select("*")
@@ -71,6 +136,12 @@ async function advanceProgress(progress: { id: string; current_segment_id: strin
   const profileIds = (profiles ?? []).map((p) => p.id);
   await revealGiftsForSession(progress.session_id, profileIds);
 
+  const acceptedProposal = await getAcceptedProposal();
+  if (acceptedProposal) {
+    await startAcceptedProposal(progress, acceptedProposal, now);
+    return;
+  }
+
   const { error } = await supabaseAdmin
     .from("reading_progress")
     .update({
@@ -83,7 +154,7 @@ async function advanceProgress(progress: { id: string; current_segment_id: strin
 }
 
 async function recordMissesIfDue(
-  progress: { current_segment_id: string },
+  progress: ProgressForAdvance,
   profiles: { id: string }[],
   checkedByProfile: Map<string, string>,
   boundary: Date,
@@ -102,6 +173,7 @@ async function recordMissesIfDue(
 
   const rows = unread.map((p) => ({
     segment_id: progress.current_segment_id,
+    session_id: progress.session_id,
     profile_id: p.id,
     book_id: segment?.book_id ?? "",
     missed_boundary: boundary.toISOString(),

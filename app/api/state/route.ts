@@ -37,6 +37,7 @@ export async function GET() {
       proposals: [],
       verseCounts: [],
       missCounts: {},
+      revealedGiftMissCounts: {},
       myGift: null,
       partnerHasGift: false,
       revealedGifts: [],
@@ -79,21 +80,33 @@ export async function GET() {
 
   // miss counts (현재 책 session 기준)
   let missCounts: Record<string, number> = {};
+  let revealedGiftMissCounts: Record<string, Record<string, number>> = {};
   let myGift = null;
   let partnerHasGift = false;
-  let revealedGifts: unknown[] = [];
+  let revealedGifts: { session_id: string; profile_id: string; is_revealed: boolean }[] = [];
 
   if (progress?.session_id) {
-    const [missesRes, giftsRes] = await Promise.all([
+    const profileIds = (profilesRes.data ?? []).map((p) => p.id);
+    const [missesRes, giftsRes, revealedGiftsRes] = await Promise.all([
       supabaseAdmin
         .from("reading_misses")
         .select("profile_id")
-        .in("profile_id", (profilesRes.data ?? []).map((p) => p.id)),
+        .eq("session_id", progress.session_id)
+        .in("profile_id", profileIds),
       supabaseAdmin
         .from("book_gifts")
         .select("id,session_id,profile_id,gift_description,is_revealed,revealed_at,created_at")
         .eq("session_id", progress.session_id),
+      supabaseAdmin
+        .from("book_gifts")
+        .select("id,session_id,profile_id,gift_description,is_revealed,revealed_at,created_at")
+        .eq("is_revealed", true)
+        .order("revealed_at", { ascending: false })
+        .limit(6),
     ]);
+    if (missesRes.error || giftsRes.error || revealedGiftsRes.error) {
+      return NextResponse.json({ error: missesRes.error?.message ?? giftsRes.error?.message ?? revealedGiftsRes.error?.message }, { status: 500 });
+    }
 
     for (const profile of profilesRes.data ?? []) missCounts[profile.id] = 0;
     for (const miss of missesRes.data ?? []) {
@@ -103,7 +116,26 @@ export async function GET() {
     const gifts = giftsRes.data ?? [];
     myGift = gifts.find((g) => g.profile_id === me.id && !g.is_revealed) ?? null;
     partnerHasGift = gifts.some((g) => g.profile_id !== me.id && !g.is_revealed);
-    revealedGifts = gifts.filter((g) => g.is_revealed);
+    revealedGifts = revealedGiftsRes.data ?? [];
+
+    const revealedSessionIds = Array.from(new Set(revealedGifts.map((gift) => gift.session_id)));
+    if (revealedSessionIds.length > 0) {
+      const { data: revealedMisses, error: revealedMissesError } = await supabaseAdmin
+        .from("reading_misses")
+        .select("session_id,profile_id")
+        .in("session_id", revealedSessionIds);
+      if (revealedMissesError) return NextResponse.json({ error: revealedMissesError.message }, { status: 500 });
+
+      for (const sessionId of revealedSessionIds) {
+        revealedGiftMissCounts[sessionId] = {};
+        for (const profile of profilesRes.data ?? []) revealedGiftMissCounts[sessionId][profile.id] = 0;
+      }
+      for (const miss of revealedMisses ?? []) {
+        const sessionCounts = revealedGiftMissCounts[miss.session_id] ?? {};
+        sessionCounts[miss.profile_id] = (sessionCounts[miss.profile_id] ?? 0) + 1;
+        revealedGiftMissCounts[miss.session_id] = sessionCounts;
+      }
+    }
   }
 
   const errors = [
@@ -152,6 +184,7 @@ export async function GET() {
     proposals: proposalsRes.data ?? [],
     verseCounts: verseCountsRes.data ?? [],
     missCounts,
+    revealedGiftMissCounts,
     myGift,
     partnerHasGift,
     revealedGifts,

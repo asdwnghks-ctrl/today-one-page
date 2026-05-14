@@ -52,6 +52,7 @@ export type ReadingProgress = {
 export type ReadingMiss = {
   id: string;
   segment_id: string;
+  session_id: string;
   profile_id: string;
   book_id: string;
   missed_boundary: string;
@@ -179,6 +180,7 @@ export type AppState = {
   proposals: BookProposal[];
   verseCounts: VerseCount[];
   missCounts: Record<string, number>;
+  revealedGiftMissCounts: Record<string, Record<string, number>>;
   myGift: BookGift | null;
   partnerHasGift: boolean;
   revealedGifts: BookGift[];

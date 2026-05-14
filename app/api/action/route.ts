@@ -1,7 +1,8 @@
 import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
+import { startAcceptedProposal } from "@/lib/reading-progress";
 import { supabaseAdmin } from "@/lib/supabase-admin";
-import type { Profile, Segment } from "@/lib/types";
+import type { Profile } from "@/lib/types";
 
 type ActionBody = {
   type: string;
@@ -270,6 +271,14 @@ export async function POST(request: NextRequest) {
         const bookId = asString(payload.bookId);
         const note = asString(payload.note);
         if (!bookId) throw new Error("책을 골라 주세요");
+        const { data: acceptedProposal, error: acceptedProposalError } = await supabaseAdmin
+          .from("book_proposals")
+          .select("id")
+          .eq("status", "accepted")
+          .limit(1)
+          .maybeSingle();
+        if (acceptedProposalError) throw acceptedProposalError;
+        if (acceptedProposal) throw new Error("이미 다음 책이 정해져 있어요");
         await supabaseAdmin.from("book_proposals").update({ status: "cancelled", cancelled_at: now }).eq("status", "pending");
         const { data, error } = await supabaseAdmin
           .from("book_proposals")
@@ -285,26 +294,36 @@ export async function POST(request: NextRequest) {
         const proposalId = asString(payload.id);
         const { data: proposal, error: proposalError } = await supabaseAdmin.from("book_proposals").select("*").eq("id", proposalId).single();
         if (proposalError) throw proposalError;
+        if (proposal.status !== "pending") throw new Error("이미 처리된 제안이에요");
         if (proposal.proposed_by === actor.id) throw new Error("상대가 수락해야 해요");
-        const { data: firstSegment, error: segmentError } = await supabaseAdmin
+        const { error: segmentError } = await supabaseAdmin
           .from("segments")
-          .select("*")
+          .select("id")
           .eq("book_id", proposal.proposed_book_id)
           .eq("chapter", 1)
           .single();
         if (segmentError) throw segmentError;
         const progress = await getCurrentProgress();
+        const { data: acceptedProposal, error: acceptedProposalError } = await supabaseAdmin
+          .from("book_proposals")
+          .select("id")
+          .eq("status", "accepted")
+          .neq("id", proposalId)
+          .limit(1)
+          .maybeSingle();
+        if (acceptedProposalError) throw acceptedProposalError;
+        if (acceptedProposal) throw new Error("이미 다음 책이 정해져 있어요");
         const { error: updateProposalError } = await supabaseAdmin
           .from("book_proposals")
           .update({ status: "accepted", accepted_by: actor.id, accepted_at: now })
           .eq("id", proposalId);
         if (updateProposalError) throw updateProposalError;
-        const { error: progressError } = await supabaseAdmin
-          .from("reading_progress")
-          .update({ current_book_id: proposal.proposed_book_id, current_segment_id: (firstSegment as Segment).id, status: "reading", started_at: now, completed_at: null, updated_at: now, session_id: crypto.randomUUID() })
-          .eq("id", progress.id);
-        if (progressError) throw progressError;
-        await notifyOthers(actor, "book_accepted", `${actor.display_name}이 다음 책을 수락했어요`, "새 책의 1장이 열렸어요.", "segment", (firstSegment as Segment).id);
+        if (progress.status === "choosing_book") {
+          const firstSegment = await startAcceptedProposal(progress, { id: proposal.id, proposed_book_id: proposal.proposed_book_id }, now);
+          await notifyOthers(actor, "book_accepted", `${actor.display_name}이 다음 책을 수락했어요`, "새 책의 1장이 열렸어요.", "segment", firstSegment.id);
+          break;
+        }
+        await notifyOthers(actor, "book_accepted", `${actor.display_name}이 다음 책을 수락했어요`, "지금 읽는 책이 끝난 다음 날 1장이 열려요.", "book_proposal", proposal.id);
         break;
       }
 

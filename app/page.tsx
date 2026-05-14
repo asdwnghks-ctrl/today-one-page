@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Bell,
   BookOpen,
@@ -9,6 +9,7 @@ import {
   Heart,
   Home,
   Library,
+  LoaderCircle,
   MessageCircle,
   Pencil,
   Send,
@@ -95,7 +96,9 @@ export default function Page() {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [onlineProfileIds, setOnlineProfileIds] = useState<string[]>([]);
   const [realtimeStatus, setRealtimeStatus] = useState("CLOSED");
+  const [actionPending, setActionPending] = useState(false);
   const broadcastChangeRef = useRef<(() => void) | null>(null);
+  const actionPendingRef = useRef(false);
 
   const fetchState = useCallback(async () => {
     const response = await fetch("/api/state", { cache: "no-store" });
@@ -183,38 +186,56 @@ export default function Page() {
     return state.messages.filter((message) => message.sender_id !== state.me?.id && !message.deleted_at && !read.has(message.id)).length;
   }, [state]);
 
-  async function refreshAfter(action: () => Promise<unknown>) {
-    setError("");
+  async function runWithPending(action: () => Promise<void>) {
+    if (actionPendingRef.current) return;
+    actionPendingRef.current = true;
+    setActionPending(true);
     try {
       await action();
-      await fetchState();
-      broadcastChangeRef.current?.();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "요청을 처리하지 못했어요");
+    } finally {
+      actionPendingRef.current = false;
+      setActionPending(false);
     }
+  }
+
+  async function refreshAfter(action: () => Promise<unknown>) {
+    await runWithPending(async () => {
+      setError("");
+      try {
+        await action();
+        await fetchState();
+        broadcastChangeRef.current?.();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "요청을 처리하지 못했어요");
+      }
+    });
   }
 
   async function login(slug: string) {
-    setError("");
-    const response = await fetch("/api/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slug, pin }),
+    await runWithPending(async () => {
+      setError("");
+      const response = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug, pin }),
+      });
+      const json = await response.json();
+      if (!response.ok) {
+        setError(json.error || "비밀번호를 다시 확인해 주세요");
+        return;
+      }
+      setPin("");
+      await fetchState();
     });
-    const json = await response.json();
-    if (!response.ok) {
-      setError(json.error || "비밀번호를 다시 확인해 주세요");
-      return;
-    }
-    setPin("");
-    await fetchState();
   }
 
   async function logout() {
-    await fetch("/api/logout", { method: "POST" });
-    setState((prev) => (prev ? { ...prev, me: null } : prev));
-    setTab("today");
-    setSelectedSlug(null);
+    await runWithPending(async () => {
+      await fetch("/api/logout", { method: "POST" });
+      setState((prev) => (prev ? { ...prev, me: null } : prev));
+      setTab("today");
+      setSelectedSlug(null);
+    });
   }
 
   if (loading) {
@@ -296,6 +317,7 @@ export default function Page() {
 
   return (
     <main className="relative z-10 mx-auto flex min-h-screen max-w-6xl flex-col px-4 pb-24 pt-5 md:px-6">
+      {actionPending && <PendingOverlay />}
       <header className="mb-5 flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2 text-xs font-bold" style={{ color: me.accent_color }}>
@@ -440,6 +462,22 @@ function MissScoreboard({ state, me, other }: { state: AppState; me: Profile; ot
   );
 }
 
+function PendingOverlay() {
+  return (
+    <>
+      <div className="fixed inset-0 z-50 cursor-wait bg-white/10" aria-hidden="true" />
+      <div
+        role="status"
+        aria-live="polite"
+        className="fixed bottom-24 left-1/2 z-50 inline-flex -translate-x-1/2 items-center gap-2 rounded-full border border-[#F2DCE5] bg-white px-4 py-2 text-sm font-bold text-[#8B7088] shadow-lg"
+      >
+        <LoaderCircle className="animate-spin text-[#A93F62]" size={16} />
+        처리 중...
+      </div>
+    </>
+  );
+}
+
 function GiftSetupCard({ state, me, other, action }: { state: AppState; me: Profile; other: Profile | null; action: (fn: () => Promise<unknown>) => Promise<void> }) {
   const [giftText, setGiftText] = useState("");
   const [editing, setEditing] = useState(false);
@@ -509,8 +547,9 @@ function RevealedGiftsCard({ state }: { state: AppState }) {
       <p className="mb-3 text-lg font-black">🎁 선물 공개!</p>
       {gifts.map((gift) => {
         const profile = state.profiles.find((p) => p.id === gift.profile_id);
-        const missCount = state.missCounts[gift.profile_id] ?? 0;
-        const otherCounts = Object.entries(state.missCounts).filter(([id]) => id !== gift.profile_id).map(([, c]) => c);
+        const sessionCounts = state.revealedGiftMissCounts[gift.session_id] ?? state.missCounts;
+        const missCount = sessionCounts[gift.profile_id] ?? 0;
+        const otherCounts = state.profiles.filter((item) => item.id !== gift.profile_id).map((item) => sessionCounts[item.id] ?? 0);
         const isLoser = otherCounts.every((c) => missCount >= c);
         return (
           <div key={gift.id} className="mb-3 rounded-2xl bg-[#FFF8F1] p-3">
@@ -1002,16 +1041,22 @@ function ChatView({
   const [message, setMessage] = useState("");
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const visibleMessages = useMemo(() => state.messages.filter((item) => !item.deleted_at), [state.messages]);
+  const latestMessageId = visibleMessages[visibleMessages.length - 1]?.id;
 
   useEffect(() => {
     void action(() => apiAction("mark_messages_read"));
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const messagesEl = messagesRef.current;
     if (!messagesEl) return;
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  }, [visibleMessages.length]);
+    const scrollToLatest = () => {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    };
+    scrollToLatest();
+    const frame = window.requestAnimationFrame(scrollToLatest);
+    return () => window.cancelAnimationFrame(frame);
+  }, [latestMessageId, visibleMessages.length, compact]);
 
   const other = state.profiles.find((profile) => profile.id !== me.id);
   const otherOnline = other ? onlineProfileIds.includes(other.id) : false;
@@ -1021,14 +1066,14 @@ function ChatView({
       .map((item) => item.message_id),
   );
   return (
-    <div className={`card flex ${compact ? "h-[calc(100vh-120px)]" : "min-h-[70vh]"} flex-col rounded-3xl`}>
+    <div className={`card flex ${compact ? "h-[calc(100vh-120px)]" : "h-[calc(100vh-190px)] min-h-[520px]"} min-h-0 flex-col rounded-3xl`}>
       <div className="border-b border-[#F2DCE5] p-4">
         <h2 className="text-lg font-black">둘만의 대화</h2>
         <p className="text-xs text-[#8B7088]">
           {otherOnline ? `${other?.display_name ?? "상대"}와 함께 있는 중` : "답장은 천천히 와도 괜찮아요."}
         </p>
       </div>
-      <div ref={messagesRef} className="flex-1 space-y-3 overflow-auto p-4">
+      <div ref={messagesRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-4">
         {visibleMessages.map((item) => {
           const mine = item.sender_id === me.id;
           const author = state.profiles.find((profile) => profile.id === item.sender_id);
@@ -1262,7 +1307,9 @@ function ProposalCard({ state, me, action, compact }: { state: AppState; me: Pro
   const [bookId, setBookId] = useState("ecc");
   const [note, setNote] = useState("");
   const pending = state.proposals.find((item) => item.status === "pending");
+  const accepted = state.proposals.find((item) => item.status === "accepted");
   const pendingBook = state.books.find((book) => book.id === pending?.proposed_book_id);
+  const acceptedBook = state.books.find((book) => book.id === accepted?.proposed_book_id);
   const proposedByMe = pending?.proposed_by === me.id;
   return (
     <div className={`card mt-4 rounded-3xl p-4 ${compact ? "" : "sticky top-5"}`}>
@@ -1278,6 +1325,11 @@ function ProposalCard({ state, me, action, compact }: { state: AppState; me: Pro
               수락하기
             </button>
           )}
+        </div>
+      ) : accepted ? (
+        <div className="mt-3 rounded-2xl bg-[#FFF8F1] p-3 text-sm">
+          <p className="font-bold">{acceptedBook?.name} 확정</p>
+          <p className="mt-1 text-[#8B7088]">지금 읽는 책이 끝난 다음 날 1장이 열려요.</p>
         </div>
       ) : (
         <div className="mt-3 space-y-2">
