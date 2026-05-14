@@ -1217,11 +1217,11 @@ function ChatView({
           const pending = item.id.startsWith("pending-");
           return (
             <div key={item.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
-              <div className={`max-w-[82%] rounded-2xl px-4 py-3 text-sm ${mine ? "text-white" : "bg-white"}`} style={mine ? { background: me.accent_color, opacity: pending ? 0.72 : 1 } : { border: `1px solid ${author?.accent_soft ?? "#F2DCE5"}` }}>
+              <div className={`max-w-[82%] rounded-2xl px-4 py-3 text-sm ${mine ? "text-white" : "bg-white"}`} style={mine ? { background: me.accent_color } : { border: `1px solid ${author?.accent_soft ?? "#F2DCE5"}` }}>
                 {!mine && <div className="mb-1 text-xs font-bold" style={{ color: author?.accent_color }}>{author?.display_name}</div>}
                 <p className="whitespace-pre-wrap">{item.body}</p>
                 <div className={`mt-1 flex items-center justify-between gap-3 text-[11px] ${mine ? "text-white/75" : "text-[#A89AA0]"}`}>
-                  <span>{pending ? "전송 중" : `${shortDate(item.created_at)} ${item.edited_at ? "· 수정됨" : ""}`}</span>
+                  <span>{shortDate(item.created_at)} {!pending && item.edited_at ? "· 수정됨" : ""}</span>
                   {mine && !pending && readByOther.has(item.id) && <span>읽음</span>}
                   {mine && !pending && action && <MessageTools item={item} action={action} />}
                 </div>
@@ -1251,16 +1251,16 @@ function ChatView({
               event.preventDefault();
             }
           }}
-          placeholder={sending ? "보내는 중..." : "메시지"}
+          placeholder="메시지"
           className="min-w-0 flex-1 rounded-2xl border border-[#F2DCE5] px-4 py-3"
         />
         <button
           disabled={sending || !message.trim() || !onSendMessage}
-          className="rounded-2xl px-4 text-white disabled:cursor-default disabled:opacity-55"
-          style={{ background: me.accent_color }}
-          aria-label={sending ? "보내는 중" : "보내기"}
+          className={`rounded-2xl px-4 transition ${message.trim() && !sending && onSendMessage ? "text-white" : "bg-white text-[#C8B5BF]"} disabled:cursor-default`}
+          style={message.trim() && !sending && onSendMessage ? { background: me.accent_color } : undefined}
+          aria-label="보내기"
         >
-          {sending ? <LoaderCircle className="animate-spin" size={18} /> : <Send size={18} />}
+          <Send size={18} />
         </button>
       </form>
     </div>
