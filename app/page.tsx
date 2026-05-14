@@ -351,7 +351,6 @@ export default function Page() {
   if (!me) {
     return (
       <main className="relative z-10 mx-auto flex min-h-screen max-w-[480px] flex-col px-6 py-10">
-        {actionPending && <PendingOverlay />}
         <div className="mb-10 pt-16 text-center">
           <div className="mb-5 inline-flex gap-2 text-[#A93F62]">
             <Sparkles size={18} />
@@ -402,11 +401,13 @@ export default function Page() {
                 autoFocus
               />
               <button
+                disabled={actionPending}
                 onClick={() => void login(selectedSlug)}
-                className="focus-ring rounded-xl px-4 py-3 text-sm font-bold text-white"
+                className="focus-ring inline-flex min-w-[72px] items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-80"
                 style={{ background: profiles.find((person) => person.slug === selectedSlug)?.accent_color ?? "#A93F62" }}
               >
-                확인
+                {actionPending && <LoaderCircle className="animate-spin" size={15} />}
+                {actionPending ? "확인 중" : "확인"}
               </button>
             </div>
           </div>
