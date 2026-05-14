@@ -288,6 +288,17 @@ export default function Page() {
     });
   }
 
+  async function refreshAfterSilently(action: () => Promise<unknown>) {
+    setError("");
+    try {
+      await action();
+      await fetchState();
+      broadcastChangeRef.current?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "요청을 처리하지 못했어요");
+    }
+  }
+
   async function login(slug: string) {
     await runWithPending(async () => {
       setError("");
@@ -452,7 +463,7 @@ export default function Page() {
               action={refreshAfter}
             />
           )}
-          {tab === "chat" && <ChatView state={appState} me={me} action={refreshAfter} onlineProfileIds={onlineProfileIds} />}
+          {tab === "chat" && <ChatView state={appState} me={me} action={refreshAfterSilently} onlineProfileIds={onlineProfileIds} />}
           {tab === "records" && (
             <RecordsView
               state={appState}
@@ -482,7 +493,7 @@ export default function Page() {
 
       {chatOpen && (
         <Drawer title="둘만의 대화" onClose={() => setChatOpen(false)}>
-          <ChatView state={appState} me={me} action={refreshAfter} onlineProfileIds={onlineProfileIds} compact />
+          <ChatView state={appState} me={me} action={refreshAfterSilently} onlineProfileIds={onlineProfileIds} compact />
         </Drawer>
       )}
 
@@ -719,7 +730,7 @@ function TodayView({
         </div>
       </div>
 
-      {state.progress?.status === "choosing_book" && <ProposalCard state={state} me={me} action={async (fn) => { await fn(); }} />}
+      {state.progress?.status === "choosing_book" && <ProposalCard state={state} me={me} action={action} />}
       {book && <p className="text-center text-xs text-[#A89AA0]">지금 함께 읽는 책: {book.name}</p>}
     </div>
   );
