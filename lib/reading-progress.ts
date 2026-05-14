@@ -15,6 +15,10 @@ type AcceptedProposal = {
   proposed_book_id: string;
 };
 
+function isMissingSessionIdColumn(error: { code?: string; message?: string } | null) {
+  return error?.code === "42703" || error?.message?.includes("reading_misses.session_id");
+}
+
 export function getKstResetBoundary(now = new Date()) {
   const kstNow = new Date(now.getTime() + KST_OFFSET_MS);
   const boundaryMs =
@@ -29,11 +33,20 @@ async function revealGiftsForSession(sessionId: string, profileIds: string[]) {
     .select("profile_id")
     .eq("session_id", sessionId)
     .in("profile_id", profileIds);
-  if (missError) throw missError;
+  let sessionMisses = misses ?? [];
+  if (missError) {
+    if (!isMissingSessionIdColumn(missError)) throw missError;
+    const { data: legacyMisses, error: legacyMissError } = await supabaseAdmin
+      .from("reading_misses")
+      .select("profile_id")
+      .in("profile_id", profileIds);
+    if (legacyMissError) throw legacyMissError;
+    sessionMisses = legacyMisses ?? [];
+  }
 
   const counts: Record<string, number> = {};
   for (const profileId of profileIds) counts[profileId] = 0;
-  for (const miss of misses ?? []) counts[miss.profile_id] = (counts[miss.profile_id] ?? 0) + 1;
+  for (const miss of sessionMisses) counts[miss.profile_id] = (counts[miss.profile_id] ?? 0) + 1;
 
   const maxCount = Math.max(...Object.values(counts));
   const losers = maxCount === 0 ? profileIds : profileIds.filter((id) => counts[id] === maxCount);
@@ -182,6 +195,14 @@ async function recordMissesIfDue(
   const { error } = await supabaseAdmin
     .from("reading_misses")
     .upsert(rows, { onConflict: "segment_id,profile_id,missed_boundary", ignoreDuplicates: true });
+  if (isMissingSessionIdColumn(error)) {
+    const legacyRows = rows.map(({ session_id: _sessionId, ...row }) => row);
+    const { error: legacyError } = await supabaseAdmin
+      .from("reading_misses")
+      .upsert(legacyRows, { onConflict: "segment_id,profile_id,missed_boundary", ignoreDuplicates: true });
+    if (legacyError) throw legacyError;
+    return;
+  }
   if (error) throw error;
 }
 

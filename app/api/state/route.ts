@@ -3,6 +3,10 @@ import { NextResponse } from "next/server";
 import { advanceAfterDailyResetIfDue } from "@/lib/reading-progress";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
+function isMissingSessionIdColumn(error: { code?: string; message?: string } | null) {
+  return error?.code === "42703" || error?.message?.includes("reading_misses.session_id");
+}
+
 export async function GET() {
   const cookieStore = await cookies();
   const slug = cookieStore.get("top_profile")?.value;
@@ -87,12 +91,13 @@ export async function GET() {
 
   if (progress?.session_id) {
     const profileIds = (profilesRes.data ?? []).map((p) => p.id);
+    const currentMissesQuery = supabaseAdmin
+      .from("reading_misses")
+      .select("profile_id")
+      .eq("session_id", progress.session_id)
+      .in("profile_id", profileIds);
     const [missesRes, giftsRes, revealedGiftsRes] = await Promise.all([
-      supabaseAdmin
-        .from("reading_misses")
-        .select("profile_id")
-        .eq("session_id", progress.session_id)
-        .in("profile_id", profileIds),
+      currentMissesQuery,
       supabaseAdmin
         .from("book_gifts")
         .select("id,session_id,profile_id,gift_description,is_revealed,revealed_at,created_at")
@@ -104,12 +109,22 @@ export async function GET() {
         .order("revealed_at", { ascending: false })
         .limit(6),
     ]);
-    if (missesRes.error || giftsRes.error || revealedGiftsRes.error) {
+    if ((missesRes.error && !isMissingSessionIdColumn(missesRes.error)) || giftsRes.error || revealedGiftsRes.error) {
       return NextResponse.json({ error: missesRes.error?.message ?? giftsRes.error?.message ?? revealedGiftsRes.error?.message }, { status: 500 });
     }
 
     for (const profile of profilesRes.data ?? []) missCounts[profile.id] = 0;
-    for (const miss of missesRes.data ?? []) {
+    let currentMisses = missesRes.data ?? [];
+    if (isMissingSessionIdColumn(missesRes.error)) {
+      const { data: legacyMisses, error: legacyMissesError } = await supabaseAdmin
+        .from("reading_misses")
+        .select("profile_id")
+        .in("profile_id", profileIds);
+      if (legacyMissesError) return NextResponse.json({ error: legacyMissesError.message }, { status: 500 });
+      currentMisses = legacyMisses ?? [];
+    }
+
+    for (const miss of currentMisses) {
       missCounts[miss.profile_id] = (missCounts[miss.profile_id] ?? 0) + 1;
     }
 
@@ -124,16 +139,29 @@ export async function GET() {
         .from("reading_misses")
         .select("session_id,profile_id")
         .in("session_id", revealedSessionIds);
-      if (revealedMissesError) return NextResponse.json({ error: revealedMissesError.message }, { status: 500 });
 
       for (const sessionId of revealedSessionIds) {
         revealedGiftMissCounts[sessionId] = {};
         for (const profile of profilesRes.data ?? []) revealedGiftMissCounts[sessionId][profile.id] = 0;
       }
-      for (const miss of revealedMisses ?? []) {
-        const sessionCounts = revealedGiftMissCounts[miss.session_id] ?? {};
-        sessionCounts[miss.profile_id] = (sessionCounts[miss.profile_id] ?? 0) + 1;
-        revealedGiftMissCounts[miss.session_id] = sessionCounts;
+      if (isMissingSessionIdColumn(revealedMissesError)) {
+        const { data: legacyRevealedMisses, error: legacyRevealedMissesError } = await supabaseAdmin
+          .from("reading_misses")
+          .select("profile_id")
+          .in("profile_id", profileIds);
+        if (legacyRevealedMissesError) return NextResponse.json({ error: legacyRevealedMissesError.message }, { status: 500 });
+
+        const legacyCounts: Record<string, number> = {};
+        for (const profile of profilesRes.data ?? []) legacyCounts[profile.id] = 0;
+        for (const miss of legacyRevealedMisses ?? []) legacyCounts[miss.profile_id] = (legacyCounts[miss.profile_id] ?? 0) + 1;
+        for (const sessionId of revealedSessionIds) revealedGiftMissCounts[sessionId] = { ...legacyCounts };
+      } else {
+        if (revealedMissesError) return NextResponse.json({ error: revealedMissesError.message }, { status: 500 });
+        for (const miss of revealedMisses ?? []) {
+          const sessionCounts = revealedGiftMissCounts[miss.session_id] ?? {};
+          sessionCounts[miss.profile_id] = (sessionCounts[miss.profile_id] ?? 0) + 1;
+          revealedGiftMissCounts[miss.session_id] = sessionCounts;
+        }
       }
     }
   }
