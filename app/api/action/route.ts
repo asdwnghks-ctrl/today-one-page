@@ -253,6 +253,12 @@ export async function POST(request: NextRequest) {
         await verifyOwner("messages", id, actor.id, "sender_id");
         const { error } = await supabaseAdmin.from("messages").update({ deleted_at: now }).eq("id", id);
         if (error) throw error;
+        const { error: notificationError } = await supabaseAdmin
+          .from("notifications")
+          .delete()
+          .eq("target_type", "message")
+          .eq("target_id", id);
+        if (notificationError) throw notificationError;
         break;
       }
 

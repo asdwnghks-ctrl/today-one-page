@@ -193,6 +193,22 @@ export async function GET() {
     .order("created_at", { ascending: false })
     .limit(50);
   if (notificationError) return NextResponse.json({ error: notificationError.message }, { status: 500 });
+  let visibleNotifications = notifications ?? [];
+  const notificationMessageIds = visibleNotifications
+    .filter((item) => item.target_type === "message" && item.target_id)
+    .map((item) => item.target_id as string);
+  if (notificationMessageIds.length > 0) {
+    const { data: notificationMessages, error: notificationMessagesError } = await supabaseAdmin
+      .from("messages")
+      .select("id,deleted_at")
+      .in("id", notificationMessageIds);
+    if (notificationMessagesError) return NextResponse.json({ error: notificationMessagesError.message }, { status: 500 });
+
+    const visibleMessageIds = new Set((notificationMessages ?? []).filter((message) => !message.deleted_at).map((message) => message.id));
+    visibleNotifications = visibleNotifications.filter(
+      (item) => item.target_type !== "message" || (item.target_id && visibleMessageIds.has(item.target_id)),
+    );
+  }
 
   return NextResponse.json({
     me,
@@ -208,7 +224,7 @@ export async function GET() {
     reactions: reactionsRes.data ?? [],
     messages: (messagesRes.data ?? []).reverse(),
     messageReads: readsRes.data ?? [],
-    notifications,
+    notifications: visibleNotifications,
     proposals: proposalsRes.data ?? [],
     verseCounts: verseCountsRes.data ?? [],
     missCounts,
