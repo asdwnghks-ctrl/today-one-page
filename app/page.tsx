@@ -465,7 +465,8 @@ export default function Page() {
                 setSelectedSegmentId(id);
                 setTab("reading");
               }}
-              action={refreshAfter}
+              action={refreshAfterSilently}
+              proposalAction={refreshAfter}
             />
           )}
           {tab === "reading" && activeSegment && (
@@ -476,7 +477,8 @@ export default function Page() {
               selectedBookId={selectedBookId}
               setSelectedBookId={setSelectedBookId}
               setSelectedSegmentId={setSelectedSegmentId}
-              action={refreshAfter}
+              action={refreshAfterSilently}
+              proposalAction={refreshAfter}
             />
           )}
           {tab === "chat" && <ChatView state={appState} me={me} action={refreshAfterSilently} onSendMessage={sendChatMessage} onlineProfileIds={onlineProfileIds} />}
@@ -488,7 +490,7 @@ export default function Page() {
               selectedSegmentId={selectedSegmentId}
               setSelectedSegmentId={setSelectedSegmentId}
               me={me}
-              action={refreshAfter}
+              action={refreshAfterSilently}
             />
           )}
         </section>
@@ -517,7 +519,7 @@ export default function Page() {
         <Drawer title="알림" onClose={() => setNotificationsOpen(false)}>
           <NotificationsView
             state={appState}
-            action={refreshAfter}
+            action={refreshAfterSilently}
             onNavigate={(targetType, targetId) => {
               if (targetType === "segment" && targetId) {
                 setSelectedSegmentId(targetId);
@@ -676,6 +678,7 @@ function TodayView({
   onRead,
   onOpenSegment,
   action,
+  proposalAction,
 }: {
   state: AppState;
   me: Profile;
@@ -685,6 +688,7 @@ function TodayView({
   onRead: () => void;
   onOpenSegment: (id: string) => void;
   action: (fn: () => Promise<unknown>) => Promise<void>;
+  proposalAction: (fn: () => Promise<unknown>) => Promise<void>;
 }) {
   const myRead = state.readingStates.some((item) => item.segment_id === segment.id && item.profile_id === me.id);
   const otherRead = other ? state.readingStates.some((item) => item.segment_id === segment.id && item.profile_id === other.id) : false;
@@ -746,7 +750,7 @@ function TodayView({
         </div>
       </div>
 
-      {state.progress?.status === "choosing_book" && <ProposalCard state={state} me={me} action={action} />}
+      {state.progress?.status === "choosing_book" && <ProposalCard state={state} me={me} action={proposalAction} />}
       {book && <p className="text-center text-xs text-[#A89AA0]">지금 함께 읽는 책: {book.name}</p>}
     </div>
   );
@@ -760,6 +764,7 @@ function ReadingView({
   setSelectedBookId,
   setSelectedSegmentId,
   action,
+  proposalAction,
 }: {
   state: AppState;
   me: Profile;
@@ -768,6 +773,7 @@ function ReadingView({
   setSelectedBookId: (id: string) => void;
   setSelectedSegmentId: (id: string) => void;
   action: (fn: () => Promise<unknown>) => Promise<void>;
+  proposalAction: (fn: () => Promise<unknown>) => Promise<void>;
 }) {
   const selectedBook = state.books.find((book) => book.id === selectedBookId) ?? state.books.find((book) => book.id === activeSegment.book_id);
   const bookSegments = state.segments.filter((segment) => segment.book_id === selectedBook?.id);
@@ -787,7 +793,7 @@ function ReadingView({
             </button>
           ))}
         </div>
-        <ProposalCard state={state} me={me} action={action} compact />
+        <ProposalCard state={state} me={me} action={proposalAction} compact />
       </div>
 
       <div className="space-y-5">
@@ -1058,6 +1064,21 @@ function EntryCard({
   action: (fn: () => Promise<unknown>) => Promise<void>;
 }) {
   const [reply, setReply] = useState("");
+  const [localReacted, setLocalReacted] = useState(reacted);
+  const [localReactions, setLocalReactions] = useState(reactions);
+
+  useEffect(() => {
+    setLocalReacted(reacted);
+    setLocalReactions(reactions);
+  }, [reacted, reactions]);
+
+  function toggleLocalReaction() {
+    const nextReacted = !localReacted;
+    setLocalReacted(nextReacted);
+    setLocalReactions((current) => Math.max(0, current + (nextReacted ? 1 : -1)));
+    onReact();
+  }
+
   return (
     <div className="card rounded-3xl p-5" style={tint ? { borderColor: tint } : undefined}>
       <div className="mb-2 flex items-start justify-between gap-3">
@@ -1080,8 +1101,8 @@ function EntryCard({
       </div>
       <p className="whitespace-pre-wrap text-sm leading-6">{body}</p>
       <div className="mt-4 flex items-center gap-2">
-        <button onClick={onReact} className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs ${reacted ? "bg-[#FCE4EC] text-[#A93F62]" : "bg-white text-[#8B7088]"}`}>
-          <Heart size={14} /> {reactions}
+        <button onClick={toggleLocalReaction} className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs ${localReacted ? "bg-[#FCE4EC] text-[#A93F62]" : "bg-white text-[#8B7088]"}`}>
+          <Heart size={14} /> {localReactions}
         </button>
       </div>
       {replies.length > 0 && (
