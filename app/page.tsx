@@ -299,6 +299,19 @@ export default function Page() {
     }
   }
 
+  async function sendChatMessage(body: string) {
+    setError("");
+    try {
+      await apiAction("send_message", { body });
+      await fetchState();
+      broadcastChangeRef.current?.();
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "메시지를 보내지 못했어요");
+      return false;
+    }
+  }
+
   async function login(slug: string) {
     await runWithPending(async () => {
       setError("");
@@ -463,7 +476,7 @@ export default function Page() {
               action={refreshAfter}
             />
           )}
-          {tab === "chat" && <ChatView state={appState} me={me} action={refreshAfterSilently} onlineProfileIds={onlineProfileIds} />}
+          {tab === "chat" && <ChatView state={appState} me={me} action={refreshAfterSilently} onSendMessage={sendChatMessage} onlineProfileIds={onlineProfileIds} />}
           {tab === "records" && (
             <RecordsView
               state={appState}
@@ -493,7 +506,7 @@ export default function Page() {
 
       {chatOpen && (
         <Drawer title="둘만의 대화" onClose={() => setChatOpen(false)}>
-          <ChatView state={appState} me={me} action={refreshAfterSilently} onlineProfileIds={onlineProfileIds} compact />
+          <ChatView state={appState} me={me} action={refreshAfterSilently} onSendMessage={sendChatMessage} onlineProfileIds={onlineProfileIds} compact />
         </Drawer>
       )}
 
@@ -1117,19 +1130,53 @@ function ChatView({
   state,
   me,
   action,
+  onSendMessage,
   onlineProfileIds = [],
   compact,
 }: {
   state: AppState;
   me: Profile;
   action?: (fn: () => Promise<unknown>) => Promise<void>;
+  onSendMessage?: (body: string) => Promise<boolean>;
   onlineProfileIds?: string[];
   compact?: boolean;
 }) {
   const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [pendingMessages, setPendingMessages] = useState<Message[]>([]);
   const messagesRef = useRef<HTMLDivElement | null>(null);
-  const visibleMessages = useMemo(() => state.messages.filter((item) => !item.deleted_at), [state.messages]);
+  const sendingRef = useRef(false);
+  const composingRef = useRef(false);
+  const visibleMessages = useMemo(() => [...state.messages.filter((item) => !item.deleted_at), ...pendingMessages], [pendingMessages, state.messages]);
   const latestMessageId = visibleMessages[visibleMessages.length - 1]?.id;
+
+  async function sendCurrentMessage() {
+    if (!onSendMessage || sendingRef.current || composingRef.current) return;
+    const body = message.trim();
+    if (!body) return;
+
+    const optimisticMessage: Message = {
+      id: `pending-${Date.now()}`,
+      sender_id: me.id,
+      body,
+      created_at: new Date().toISOString(),
+      edited_at: null,
+      deleted_at: null,
+    };
+
+    sendingRef.current = true;
+    setSending(true);
+    setMessage("");
+    setPendingMessages((prev) => [...prev, optimisticMessage]);
+
+    const sent = await onSendMessage(body);
+    setPendingMessages((prev) => prev.filter((item) => item.id !== optimisticMessage.id));
+    if (!sent) {
+      setMessage((current) => current || body);
+    }
+    sendingRef.current = false;
+    setSending(false);
+  }
 
   useLayoutEffect(() => {
     const messagesEl = messagesRef.current;
@@ -1161,15 +1208,16 @@ function ChatView({
         {visibleMessages.map((item) => {
           const mine = item.sender_id === me.id;
           const author = state.profiles.find((profile) => profile.id === item.sender_id);
+          const pending = item.id.startsWith("pending-");
           return (
             <div key={item.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
-              <div className={`max-w-[82%] rounded-2xl px-4 py-3 text-sm ${mine ? "text-white" : "bg-white"}`} style={mine ? { background: me.accent_color } : { border: `1px solid ${author?.accent_soft ?? "#F2DCE5"}` }}>
+              <div className={`max-w-[82%] rounded-2xl px-4 py-3 text-sm ${mine ? "text-white" : "bg-white"}`} style={mine ? { background: me.accent_color, opacity: pending ? 0.72 : 1 } : { border: `1px solid ${author?.accent_soft ?? "#F2DCE5"}` }}>
                 {!mine && <div className="mb-1 text-xs font-bold" style={{ color: author?.accent_color }}>{author?.display_name}</div>}
                 <p className="whitespace-pre-wrap">{item.body}</p>
                 <div className={`mt-1 flex items-center justify-between gap-3 text-[11px] ${mine ? "text-white/75" : "text-[#A89AA0]"}`}>
-                  <span>{shortDate(item.created_at)} {item.edited_at && "· 수정됨"}</span>
-                  {mine && readByOther.has(item.id) && <span>읽음</span>}
-                  {mine && action && <MessageTools item={item} action={action} />}
+                  <span>{pending ? "전송 중" : `${shortDate(item.created_at)} ${item.edited_at ? "· 수정됨" : ""}`}</span>
+                  {mine && !pending && readByOther.has(item.id) && <span>읽음</span>}
+                  {mine && !pending && action && <MessageTools item={item} action={action} />}
                 </div>
               </div>
             </div>
@@ -1179,17 +1227,34 @@ function ChatView({
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          if (!message.trim() || !action) return;
-          void action(async () => {
-            await apiAction("send_message", { body: message });
-            setMessage("");
-          });
+          void sendCurrentMessage();
         }}
         className="flex gap-2 border-t border-[#F2DCE5] p-3"
       >
-        <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="메시지" className="min-w-0 flex-1 rounded-2xl border border-[#F2DCE5] px-4 py-3" />
-        <button className="rounded-2xl px-4 text-white" style={{ background: me.accent_color }} aria-label="보내기">
-          <Send size={18} />
+        <input
+          value={message}
+          onChange={(event) => setMessage(event.target.value)}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && event.nativeEvent.isComposing) {
+              event.preventDefault();
+            }
+          }}
+          placeholder={sending ? "보내는 중..." : "메시지"}
+          className="min-w-0 flex-1 rounded-2xl border border-[#F2DCE5] px-4 py-3"
+        />
+        <button
+          disabled={sending || !message.trim() || !onSendMessage}
+          className="rounded-2xl px-4 text-white disabled:cursor-default disabled:opacity-55"
+          style={{ background: me.accent_color }}
+          aria-label={sending ? "보내는 중" : "보내기"}
+        >
+          {sending ? <LoaderCircle className="animate-spin" size={18} /> : <Send size={18} />}
         </button>
       </form>
     </div>
