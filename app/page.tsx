@@ -1143,10 +1143,9 @@ function ChatView({
   compact?: boolean;
 }) {
   const [message, setMessage] = useState("");
-  const [sending, setSending] = useState(false);
   const [pendingMessages, setPendingMessages] = useState<Message[]>([]);
   const messagesRef = useRef<HTMLDivElement | null>(null);
-  const sendingRef = useRef(false);
+  const submittedMessageKeysRef = useRef(new Set<string>());
   const composingRef = useRef(false);
   const visibleMessages = useMemo(() => [...state.messages.filter((item) => !item.deleted_at), ...pendingMessages], [pendingMessages, state.messages]);
   const latestMessageId = visibleMessages[visibleMessages.length - 1]?.id;
@@ -1158,9 +1157,11 @@ function ChatView({
   }
 
   async function sendCurrentMessage() {
-    if (!onSendMessage || sendingRef.current || composingRef.current) return;
+    if (!onSendMessage || composingRef.current) return;
     const body = message.trim();
     if (!body) return;
+    const dedupeKey = `${me.id}:${body}`;
+    if (submittedMessageKeysRef.current.has(dedupeKey)) return;
 
     const optimisticMessage: Message = {
       id: `pending-${Date.now()}`,
@@ -1171,9 +1172,8 @@ function ChatView({
       deleted_at: null,
     };
 
-    sendingRef.current = true;
+    submittedMessageKeysRef.current.add(dedupeKey);
     flushSync(() => {
-      setSending(true);
       setMessage("");
       setPendingMessages((prev) => [...prev, optimisticMessage]);
     });
@@ -1185,8 +1185,7 @@ function ChatView({
     if (!sent) {
       setMessage((current) => current || body);
     }
-    sendingRef.current = false;
-    setSending(false);
+    submittedMessageKeysRef.current.delete(dedupeKey);
   }
 
   useLayoutEffect(() => {
@@ -1255,9 +1254,9 @@ function ChatView({
           className="min-w-0 flex-1 rounded-2xl border border-[#F2DCE5] px-4 py-3"
         />
         <button
-          disabled={sending || !message.trim() || !onSendMessage}
-          className={`rounded-2xl px-4 transition ${message.trim() && !sending && onSendMessage ? "text-white" : "bg-white text-[#C8B5BF]"} disabled:cursor-default`}
-          style={message.trim() && !sending && onSendMessage ? { background: me.accent_color } : undefined}
+          disabled={!message.trim() || !onSendMessage}
+          className={`rounded-2xl px-4 transition ${message.trim() && onSendMessage ? "text-white" : "bg-white text-[#C8B5BF]"} disabled:cursor-default`}
+          style={message.trim() && onSendMessage ? { background: me.accent_color } : undefined}
           aria-label="보내기"
         >
           <Send size={18} />
