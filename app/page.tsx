@@ -1498,12 +1498,15 @@ function ProposalCard({ state, me, action, compact }: { state: AppState; me: Pro
 }
 
 function NotificationsView({ state, action, onNavigate }: { state: AppState; action: (fn: () => Promise<unknown>) => Promise<void>; onNavigate: (targetType: string | null, targetId: string | null) => void }) {
+  const notifications = state.notifications.filter((item) => !item.read_at);
   return (
     <div className="space-y-3">
-      <button onClick={() => action(() => apiAction("mark_all_notifications_read"))} className="rounded-xl bg-white px-3 py-2 text-sm font-bold text-[#8B7088]">
-        모두 읽음
-      </button>
-      {state.notifications.map((item) => (
+      {notifications.length > 0 && (
+        <button onClick={() => action(() => apiAction("mark_all_notifications_read"))} className="rounded-xl bg-white px-3 py-2 text-sm font-bold text-[#8B7088]">
+          모두 읽음
+        </button>
+      )}
+      {notifications.map((item) => (
         <button
           key={item.id}
           onClick={() =>
@@ -1512,14 +1515,14 @@ function NotificationsView({ state, action, onNavigate }: { state: AppState; act
               onNavigate(item.target_type, item.target_id);
             })
           }
-          className={`block w-full rounded-2xl p-4 text-left ${item.read_at ? "bg-white/70" : "bg-[#FCE4EC]"}`}
+          className="block w-full rounded-2xl bg-[#FCE4EC] p-4 text-left"
         >
           <p className="font-bold">{item.title}</p>
           {item.body && <p className="mt-1 text-sm text-[#8B7088]">{item.body}</p>}
           <p className="mt-2 text-xs text-[#A89AA0]">{shortDate(item.created_at)}</p>
         </button>
       ))}
-      {state.notifications.length === 0 && <p className="rounded-2xl bg-white p-4 text-center text-sm text-[#8B7088]">새 알림이 없어요.</p>}
+      {notifications.length === 0 && <p className="rounded-2xl bg-white p-4 text-center text-sm text-[#8B7088]">새 알림이 없어요.</p>}
     </div>
   );
 }

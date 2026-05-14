@@ -190,6 +190,7 @@ export async function GET() {
     .from("notifications")
     .select("*")
     .eq("profile_id", me.id)
+    .is("read_at", null)
     .order("created_at", { ascending: false })
     .limit(50);
   if (notificationError) return NextResponse.json({ error: notificationError.message }, { status: 500 });
