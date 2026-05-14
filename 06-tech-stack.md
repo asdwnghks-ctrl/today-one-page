@@ -11,13 +11,13 @@ MVP는 **Vercel + Supabase만으로 충분하다.**
 - **Framework:** Next.js
 - **Language:** TypeScript
 - **Styling:** Tailwind CSS
-- **UI Components:** shadcn/ui
+- **UI Components:** Tailwind 기반 로컬 컴포넌트
 - **Animation:** Framer Motion
 - **Icons:** lucide-react
 - **Backend:** Supabase
 - **Database:** Supabase Postgres
 - **Realtime:** Supabase Realtime
-- **Auth:** Supabase Auth 기반 이름 선택 로그인
+- **Auth:** 공유 PIN + httpOnly cookie 기반 이름 선택 로그인
 - **Deploy:** Vercel
 
 ## 왜 이 조합인가
@@ -37,6 +37,8 @@ MVP는 **Vercel + Supabase만으로 충분하다.**
 - 로그인/세션 관리
 - 책, segment seed 데이터
 - 성서 segment 읽음 체크 상태
+- 책 회차별 못 읽음 기록
+- 책 회차별 선물 약속과 공개 상태
 - 다음 책 제안/수락 상태
 - 하이라이트
 - 장별 코멘트와 답글
@@ -69,9 +71,9 @@ Supabase CLI 자동 로그인은 비대화형 터미널에서 막히므로, Dash
 - GitHub: `https://github.com/asdwnghks-ctrl/today-one-page`
 - Root Directory: `.`
 - Node.js: `24.x`
-- 현재 Framework Preset: `Other`
+- Framework: `nextjs` (`vercel.json`)
 
-아직 실제 Next.js 앱이 없어서 Vercel은 `Other` 프로젝트로 연결되어 있다. Next.js 앱을 scaffold한 뒤에는 Vercel이 Next.js 프로젝트로 빌드하도록 설정을 맞춘다.
+현재 저장소에는 실제 Next.js 앱이 있고, `vercel.json`에서 Next.js 빌드와 `npm run build`를 사용하도록 설정되어 있다.
 
 ## 자동 배포 흐름
 
@@ -83,7 +85,30 @@ Supabase CLI 자동 로그인은 비대화형 터미널에서 막히므로, Dash
 local commit -> auto git push -> GitHub main -> Vercel deployment
 ```
 
-주의: 현재는 앱 진입점이 없어서 Vercel에 연결은 되어 있지만 실제 서비스 화면은 아직 없다. Next.js 앱을 만든 뒤부터 배포 결과가 의미 있게 보인다.
+주의: 배포 결과가 DB 상태에 의존하므로 Vercel 환경 변수와 Supabase migration 상태를 함께 확인해야 한다.
+
+## Render 사용 여부
+
+현재 API 규모에서는 Render를 별도로 붙일 필요가 크지 않다.
+
+지금 앱의 서버 작업은 Next.js Route Handler와 Supabase로 충분하다.
+
+- 로그인
+- 상태 조회
+- 읽음 체크
+- 코멘트/하이라이트/반응 저장
+- 책 제안/수락
+- 채팅 메시지 저장
+- 앱 안 알림 읽음 처리
+
+Render가 유용해질 수 있는 경우:
+
+- Vercel 요청 시간 안에 처리하기 어려운 긴 백그라운드 작업이 생길 때
+- 정교한 cron/worker가 필요할 때
+- 대용량 파일 처리, 이미지 변환, 외부 API polling 같은 서버 상주 작업이 필요할 때
+- Supabase Edge Function이나 Vercel Cron보다 별도 서버 운영이 더 단순해질 때
+
+현재는 인프라를 늘리기보다 Vercel + Supabase 조합을 유지한다.
 
 ## 실시간 채팅 방식
 
@@ -97,7 +122,8 @@ messages
 - sender_id
 - body
 - created_at
-- read_at
+- edited_at
+- deleted_at
 ```
 
 두 사람만 쓰는 앱이므로 처음에는 `room_id` 없이 시작해도 된다. 나중에 구조를 더 일반화하고 싶으면 `chat_rooms`, `chat_members`를 추가할 수 있다.
@@ -108,16 +134,16 @@ messages
 
 ## 인증 방향
 
-회원가입은 만들지 않는다. Supabase Auth를 내부적으로 쓰고, 화면은 이름 선택 + 비밀번호 입력처럼 보이게 만든다.
+회원가입은 만들지 않는다. 화면은 이름 선택 + 비밀번호 입력처럼 보이게 만든다.
 
-### 선택: Supabase Auth 사용
+### 현재 선택: 공유 PIN + httpOnly cookie
 
-- 주환, 희진 계정을 미리 만들어둔다.
-- 내부적으로 이메일/비밀번호 세션을 쓴다.
-- 화면은 이름 선택 + 비밀번호 입력처럼 보이게 만든다.
-- 보안과 세션 관리가 안정적이다.
+- 주환, 희진 profile을 Supabase에 미리 만들어둔다.
+- 앱 서버는 `APP_SHARED_PIN`을 확인한다.
+- PIN이 맞으면 `top_profile` httpOnly cookie에 현재 사용자 slug를 저장한다.
+- 브라우저는 Supabase service role key를 직접 갖지 않는다.
 
-사용자는 단순한 PIN/비밀번호 로그인처럼 느끼고, 내부 세션은 Supabase가 관리한다. 완전 커스텀 PIN 로그인은 만들지 않는다.
+사용자는 단순한 PIN/비밀번호 로그인처럼 느낀다. 나중에 보안을 더 엄격하게 가져가야 하면 Supabase Auth로 전환할 수 있다.
 
 ## 지금 당장 필요한 외부 도구
 
