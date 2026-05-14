@@ -99,6 +99,7 @@ export default function Page() {
   const [actionPending, setActionPending] = useState(false);
   const broadcastChangeRef = useRef<(() => void) | null>(null);
   const actionPendingRef = useRef(false);
+  const notificationMarkingRef = useRef(false);
 
   const fetchState = useCallback(async () => {
     const response = await fetch("/api/state", { cache: "no-store" });
@@ -185,6 +186,41 @@ export default function Page() {
     const read = new Set(state.messageReads.filter((item) => item.profile_id === state.me?.id).map((item) => item.message_id));
     return state.messages.filter((message) => message.sender_id !== state.me?.id && !message.deleted_at && !read.has(message.id)).length;
   }, [state]);
+
+  const quietlyMarkNotificationsRead = useCallback(
+    async (types: string[]) => {
+      if (!state?.me || notificationMarkingRef.current) return;
+      const hasUnread = state.notifications.some((item) => !item.read_at && types.includes(item.type));
+      if (!hasUnread) return;
+
+      notificationMarkingRef.current = true;
+      const readAt = new Date().toISOString();
+      setState((prev) =>
+        prev
+          ? {
+              ...prev,
+              notifications: prev.notifications.map((item) =>
+                !item.read_at && types.includes(item.type) ? { ...item, read_at: readAt } : item,
+              ),
+            }
+          : prev,
+      );
+      try {
+        await apiAction("mark_notifications_read", { types });
+        await fetchState();
+      } catch {
+        fetchState().catch(() => undefined);
+      } finally {
+        notificationMarkingRef.current = false;
+      }
+    },
+    [fetchState, state?.me, state?.notifications],
+  );
+
+  useEffect(() => {
+    if (tab !== "reading") return;
+    void quietlyMarkNotificationsRead(["comment", "reply"]);
+  }, [quietlyMarkNotificationsRead, tab]);
 
   async function runWithPending(action: () => Promise<void>) {
     if (actionPendingRef.current) return;

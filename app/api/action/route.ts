@@ -31,6 +31,10 @@ function asNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function asStringArray(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
 async function notifyOthers(actor: Profile, type: string, title: string, body?: string, targetType?: string, targetId?: string) {
   const { data: others, error } = await supabaseAdmin
     .from("profiles")
@@ -264,6 +268,13 @@ export async function POST(request: NextRequest) {
           const { error: readError } = await supabaseAdmin.from("message_reads").upsert(rows, { onConflict: "message_id,profile_id" });
           if (readError) throw readError;
         }
+        const { error: notificationError } = await supabaseAdmin
+          .from("notifications")
+          .update({ read_at: now })
+          .eq("profile_id", actor.id)
+          .eq("type", "message")
+          .is("read_at", null);
+        if (notificationError) throw notificationError;
         break;
       }
 
@@ -345,6 +356,19 @@ export async function POST(request: NextRequest) {
       case "mark_notification_read": {
         const id = asString(payload.id);
         const { error } = await supabaseAdmin.from("notifications").update({ read_at: now }).eq("id", id).eq("profile_id", actor.id);
+        if (error) throw error;
+        break;
+      }
+
+      case "mark_notifications_read": {
+        const types = asStringArray(payload.types);
+        if (!types.length) throw new Error("읽음 처리할 알림 종류가 필요해요");
+        const { error } = await supabaseAdmin
+          .from("notifications")
+          .update({ read_at: now })
+          .eq("profile_id", actor.id)
+          .in("type", types)
+          .is("read_at", null);
         if (error) throw error;
         break;
       }
