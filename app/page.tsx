@@ -351,6 +351,7 @@ export default function Page() {
   if (!me) {
     return (
       <main className="relative z-10 mx-auto flex min-h-screen max-w-[480px] flex-col px-6 py-10">
+        {actionPending && <PendingOverlay />}
         <div className="mb-10 pt-16 text-center">
           <div className="mb-5 inline-flex gap-2 text-[#A93F62]">
             <Sparkles size={18} />
