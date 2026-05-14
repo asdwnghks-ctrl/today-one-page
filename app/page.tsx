@@ -10,7 +10,6 @@ import {
   Heart,
   Home,
   Library,
-  LoaderCircle,
   MessageCircle,
   Pencil,
   Send,
@@ -97,9 +96,8 @@ export default function Page() {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [onlineProfileIds, setOnlineProfileIds] = useState<string[]>([]);
   const [realtimeStatus, setRealtimeStatus] = useState("CLOSED");
-  const [actionPending, setActionPending] = useState(false);
+  const [loginPending, setLoginPending] = useState(false);
   const broadcastChangeRef = useRef<(() => void) | null>(null);
-  const actionPendingRef = useRef(false);
   const notificationMarkingRef = useRef(false);
 
   const fetchState = useCallback(async () => {
@@ -264,29 +262,16 @@ export default function Page() {
     void quietlyMarkMessagesRead();
   }, [chatOpen, quietlyMarkMessagesRead, tab]);
 
-  async function runWithPending(action: () => Promise<void>) {
-    if (actionPendingRef.current) return;
-    actionPendingRef.current = true;
-    setActionPending(true);
+  async function refreshAfter(action: () => Promise<unknown>) {
+    setError("");
     try {
       await action();
-    } finally {
-      actionPendingRef.current = false;
-      setActionPending(false);
+      await fetchState();
+      broadcastChangeRef.current?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "요청을 처리하지 못했어요");
+      fetchState().catch(() => undefined);
     }
-  }
-
-  async function refreshAfter(action: () => Promise<unknown>) {
-    await runWithPending(async () => {
-      setError("");
-      try {
-        await action();
-        await fetchState();
-        broadcastChangeRef.current?.();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "요청을 처리하지 못했어요");
-      }
-    });
   }
 
   async function refreshAfterSilently(action: () => Promise<unknown>) {
@@ -297,6 +282,7 @@ export default function Page() {
       broadcastChangeRef.current?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "요청을 처리하지 못했어요");
+      fetchState().catch(() => undefined);
     }
   }
 
@@ -314,8 +300,10 @@ export default function Page() {
   }
 
   async function login(slug: string) {
-    await runWithPending(async () => {
-      setError("");
+    if (loginPending) return;
+    setLoginPending(true);
+    setError("");
+    try {
       const response = await fetch("/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -328,16 +316,37 @@ export default function Page() {
       }
       setPin("");
       await fetchState();
-    });
+    } finally {
+      setLoginPending(false);
+    }
   }
 
   async function logout() {
-    await runWithPending(async () => {
-      await fetch("/api/logout", { method: "POST" });
-      setState((prev) => (prev ? { ...prev, me: null } : prev));
-      setTab("today");
-      setSelectedSlug(null);
+    setState((prev) => (prev ? { ...prev, me: null } : prev));
+    setTab("today");
+    setSelectedSlug(null);
+    fetch("/api/logout", { method: "POST" }).catch(() => undefined);
+  }
+
+  async function checkReadOptimistically(segmentId: string) {
+    if (!me) return;
+    const checkedAt = new Date().toISOString();
+    setState((prev) => {
+      if (!prev || prev.readingStates.some((item) => item.segment_id === segmentId && item.profile_id === me.id)) return prev;
+      return {
+        ...prev,
+        readingStates: [
+          ...prev.readingStates,
+          {
+            id: `local-${segmentId}-${me.id}`,
+            segment_id: segmentId,
+            profile_id: me.id,
+            checked_at: checkedAt,
+          },
+        ],
+      };
     });
+    await refreshAfter(() => apiAction("check_read", { segmentId }));
   }
 
   if (loading) {
@@ -401,13 +410,12 @@ export default function Page() {
                 autoFocus
               />
               <button
-                disabled={actionPending}
+                disabled={loginPending}
                 onClick={() => void login(selectedSlug)}
                 className="focus-ring inline-flex min-w-[72px] items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-80"
                 style={{ background: profiles.find((person) => person.slug === selectedSlug)?.accent_color ?? "#A93F62" }}
               >
-                {actionPending && <LoaderCircle className="animate-spin" size={15} />}
-                {actionPending ? "확인 중" : "확인"}
+                {loginPending ? "확인 중" : "확인"}
               </button>
             </div>
           </div>
@@ -421,7 +429,6 @@ export default function Page() {
 
   return (
     <main className="relative z-10 mx-auto flex min-h-screen max-w-6xl flex-col px-4 pb-24 pt-5 md:px-6">
-      {actionPending && <PendingOverlay />}
       <header className="mb-5 flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2 text-xs font-bold" style={{ color: me.accent_color }}>
@@ -460,7 +467,7 @@ export default function Page() {
               other={other}
               segment={currentSegment}
               book={currentBook}
-              onRead={() => refreshAfter(() => apiAction("check_read", { segmentId: currentSegment.id }))}
+              onRead={() => checkReadOptimistically(currentSegment.id)}
               onOpenSegment={(id) => {
                 setSelectedSegmentId(id);
                 setTab("reading");
@@ -568,22 +575,6 @@ function MissScoreboard({ state, me, other }: { state: AppState; me: Profile; ot
   );
 }
 
-function PendingOverlay() {
-  return (
-    <>
-      <div className="fixed inset-0 z-50 cursor-wait bg-white/10" aria-hidden="true" />
-      <div
-        role="status"
-        aria-live="polite"
-        className="fixed bottom-24 left-1/2 z-50 inline-flex -translate-x-1/2 items-center gap-2 rounded-full border border-[#F2DCE5] bg-white px-4 py-2 text-sm font-bold text-[#8B7088] shadow-lg"
-      >
-        <LoaderCircle className="animate-spin text-[#A93F62]" size={16} />
-        처리 중...
-      </div>
-    </>
-  );
-}
-
 function GiftSetupCard({ state, me, other, action }: { state: AppState; me: Profile; other: Profile | null; action: (fn: () => Promise<unknown>) => Promise<void> }) {
   const [giftText, setGiftText] = useState("");
   const [editing, setEditing] = useState(false);
@@ -632,7 +623,13 @@ function GiftSetupCard({ state, me, other, action }: { state: AppState; me: Prof
       />
       <div className="mt-2 flex gap-2">
         <button
-          onClick={() => action(async () => { await apiAction("set_gift", { giftDescription: giftText }); setEditing(false); setGiftText(""); })}
+          onClick={() => {
+            const giftDescription = giftText.trim();
+            if (!giftDescription) return;
+            setEditing(false);
+            setGiftText("");
+            void action(() => apiAction("set_gift", { giftDescription }));
+          }}
           className="rounded-xl px-4 py-2 text-sm font-bold text-white"
           style={{ background: me.accent_color }}
         >
@@ -880,12 +877,14 @@ function SegmentDetail({
             className="min-h-28 w-full rounded-2xl border border-[#F2DCE5] px-4 py-3"
           />
           <button
-            onClick={() =>
-              action(async () => {
-                await apiAction("add_comment", { segmentId: segment.id, body: comment });
-                setComment("");
-              })
-            }
+            onClick={() => {
+              const body = comment.trim();
+              if (!body) return;
+              setComment("");
+              void action(async () => {
+                await apiAction("add_comment", { segmentId: segment.id, body });
+              });
+            }}
             className="mt-3 rounded-xl px-4 py-2 text-sm font-bold text-white"
             style={{ background: me.accent_color }}
           >
@@ -938,22 +937,31 @@ function SegmentDetail({
             className="mb-3 min-h-20 w-full rounded-xl border border-[#F2DCE5] px-3 py-2"
           />
           <button
-            onClick={() =>
-              action(async () => {
+            onClick={() => {
+              if (!selectedVerseRef) return;
+              const nextHighlight = {
+                segmentId: segment.id,
+                verseRef: selectedVerseRef,
+                startVerse,
+                endVerse: endVerse ?? startVerse,
+                note,
+                color,
+              };
+              setNote("");
+              setStartVerse(null);
+              setEndVerse(null);
+              setManualVerse("");
+              void action(async () => {
                 await apiAction("add_highlight", {
-                  segmentId: segment.id,
-                  verseRef: selectedVerseRef,
-                  startVerse,
-                  endVerse: endVerse ?? startVerse,
-                  note,
-                  color,
+                  segmentId: nextHighlight.segmentId,
+                  verseRef: nextHighlight.verseRef,
+                  startVerse: nextHighlight.startVerse,
+                  endVerse: nextHighlight.endVerse,
+                  note: nextHighlight.note,
+                  color: nextHighlight.color,
                 });
-                setNote("");
-                setStartVerse(null);
-                setEndVerse(null);
-                setManualVerse("");
-              })
-            }
+              });
+            }}
             className="rounded-xl px-4 py-2 text-sm font-bold text-white"
             style={{ background: me.accent_color }}
           >
@@ -1478,27 +1486,43 @@ function ReadOnlyEntryCard({
 function ProposalCard({ state, me, action, compact }: { state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void>; compact?: boolean }) {
   const [bookId, setBookId] = useState("ecc");
   const [note, setNote] = useState("");
+  const [localProposal, setLocalProposal] = useState<{ status: "pending" | "accepted"; proposed_book_id: string; proposed_by: string; note: string | null } | null>(null);
   const pending = state.proposals.find((item) => item.status === "pending");
   const accepted = state.proposals.find((item) => item.status === "accepted");
-  const pendingBook = state.books.find((book) => book.id === pending?.proposed_book_id);
-  const acceptedBook = state.books.find((book) => book.id === accepted?.proposed_book_id);
-  const proposedByMe = pending?.proposed_by === me.id;
+  const activePending = pending ?? (localProposal?.status === "pending" ? localProposal : null);
+  const activeAccepted = accepted ?? (localProposal?.status === "accepted" ? localProposal : null);
+  const pendingBook = state.books.find((book) => book.id === activePending?.proposed_book_id);
+  const acceptedBook = state.books.find((book) => book.id === activeAccepted?.proposed_book_id);
+  const proposedByMe = activePending?.proposed_by === me.id;
+
+  useEffect(() => {
+    setLocalProposal(null);
+  }, [pending?.id, accepted?.id]);
+
   return (
     <div className={`card mt-4 rounded-3xl p-4 ${compact ? "" : "sticky top-5"}`}>
       <h3 className="font-black">다음 책</h3>
-      {pending ? (
+      {activePending ? (
         <div className="mt-3 rounded-2xl bg-[#FFF8F1] p-3 text-sm">
           <p className="font-bold">{pendingBook?.name} 제안 중</p>
-          <p className="mt-1 text-[#8B7088]">{pending.note || "같이 읽어볼까요?"}</p>
+          <p className="mt-1 text-[#8B7088]">{activePending.note || "같이 읽어볼까요?"}</p>
           {proposedByMe ? (
             <p className="mt-3 text-xs text-[#A89AA0]">상대의 수락을 기다리는 중이에요.</p>
           ) : (
-            <button onClick={() => action(() => apiAction("accept_proposal", { id: pending.id }))} className="mt-3 rounded-xl px-3 py-2 text-sm font-bold text-white" style={{ background: me.accent_color }}>
+            <button
+              onClick={() => {
+                if (!pending) return;
+                setLocalProposal({ status: "accepted", proposed_book_id: pending.proposed_book_id, proposed_by: pending.proposed_by, note: pending.note });
+                void action(() => apiAction("accept_proposal", { id: pending.id }));
+              }}
+              className="mt-3 rounded-xl px-3 py-2 text-sm font-bold text-white"
+              style={{ background: me.accent_color }}
+            >
               수락하기
             </button>
           )}
         </div>
-      ) : accepted ? (
+      ) : activeAccepted ? (
         <div className="mt-3 rounded-2xl bg-[#FFF8F1] p-3 text-sm">
           <p className="font-bold">{acceptedBook?.name} 확정</p>
           <p className="mt-1 text-[#8B7088]">지금 읽는 책이 끝난 다음 날 1장이 열려요.</p>
@@ -1511,7 +1535,16 @@ function ProposalCard({ state, me, action, compact }: { state: AppState; me: Pro
             ))}
           </select>
           <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="짧은 제안 메모" className="w-full rounded-xl border border-[#F2DCE5] px-3 py-2 text-sm" />
-          <button onClick={() => action(() => apiAction("propose_book", { bookId, note }))} className="w-full rounded-xl px-3 py-2 text-sm font-bold text-white" style={{ background: me.accent_color }}>
+          <button
+            onClick={() => {
+              const nextNote = note.trim();
+              setLocalProposal({ status: "pending", proposed_book_id: bookId, proposed_by: me.id, note: nextNote || null });
+              setNote("");
+              void action(() => apiAction("propose_book", { bookId, note: nextNote }));
+            }}
+            className="w-full rounded-xl px-3 py-2 text-sm font-bold text-white"
+            style={{ background: me.accent_color }}
+          >
             제안하기
           </button>
         </div>
