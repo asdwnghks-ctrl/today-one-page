@@ -15,6 +15,10 @@ type AcceptedProposal = {
   proposed_book_id: string;
 };
 
+type AdvanceResult = {
+  segmentId: string | null;
+};
+
 function isMissingSessionIdColumn(error: { code?: string; message?: string } | null) {
   return error?.code === "42703" || error?.message?.includes("reading_misses.session_id");
 }
@@ -112,7 +116,7 @@ async function getAcceptedProposal() {
   return data as AcceptedProposal | null;
 }
 
-async function advanceProgress(progress: ProgressForAdvance, segmentId: string) {
+async function advanceProgress(progress: ProgressForAdvance, segmentId: string): Promise<AdvanceResult> {
   const { data: currentSegment, error: segmentError } = await supabaseAdmin
     .from("segments")
     .select("*")
@@ -140,7 +144,7 @@ async function advanceProgress(progress: ProgressForAdvance, segmentId: string) 
       })
       .eq("id", progress.id);
     if (error) throw error;
-    return;
+    return { segmentId: nextSegment.id };
   }
 
   // 책 완료 — gift 공개
@@ -151,8 +155,8 @@ async function advanceProgress(progress: ProgressForAdvance, segmentId: string) 
 
   const acceptedProposal = await getAcceptedProposal();
   if (acceptedProposal) {
-    await startAcceptedProposal(progress, acceptedProposal, now);
-    return;
+    const firstSegment = await startAcceptedProposal(progress, acceptedProposal, now);
+    return { segmentId: firstSegment.id };
   }
 
   const { error } = await supabaseAdmin
@@ -164,6 +168,7 @@ async function advanceProgress(progress: ProgressForAdvance, segmentId: string) 
     })
     .eq("id", progress.id);
   if (error) throw error;
+  return { segmentId: null };
 }
 
 async function recordMissesIfDue(
@@ -204,6 +209,53 @@ async function recordMissesIfDue(
     return;
   }
   if (error) throw error;
+}
+
+async function hasMissForCurrentSegment(progress: ProgressForAdvance) {
+  const { data, error } = await supabaseAdmin
+    .from("reading_misses")
+    .select("id")
+    .eq("session_id", progress.session_id)
+    .eq("segment_id", progress.current_segment_id)
+    .limit(1);
+
+  if (isMissingSessionIdColumn(error)) {
+    const { data: legacyData, error: legacyError } = await supabaseAdmin
+      .from("reading_misses")
+      .select("id")
+      .eq("segment_id", progress.current_segment_id)
+      .limit(1);
+    if (legacyError) throw legacyError;
+    return (legacyData ?? []).length > 0;
+  }
+
+  if (error) throw error;
+  return (data ?? []).length > 0;
+}
+
+export async function manualAdvanceIfAllowed(profileId: string) {
+  const { data: progress, error: progressError } = await supabaseAdmin
+    .from("reading_progress")
+    .select("*")
+    .limit(1)
+    .maybeSingle();
+  if (progressError) throw progressError;
+  if (!progress || progress.status !== "reading") throw new Error("진행 중인 읽기 범위가 없어요");
+
+  const { data: checkedState, error: checkedError } = await supabaseAdmin
+    .from("reading_states")
+    .select("id")
+    .eq("segment_id", progress.current_segment_id)
+    .eq("profile_id", profileId)
+    .not("checked_at", "is", null)
+    .maybeSingle();
+  if (checkedError) throw checkedError;
+  if (!checkedState) throw new Error("내 분량을 읽음 체크한 뒤에 넘어갈 수 있어요");
+
+  const hasMiss = await hasMissForCurrentSegment(progress);
+  if (!hasMiss) throw new Error("전날 못 읽은 사람이 있을 때만 넘어갈 수 있어요");
+
+  return advanceProgress(progress, progress.current_segment_id);
 }
 
 export async function advanceAfterDailyResetIfDue() {

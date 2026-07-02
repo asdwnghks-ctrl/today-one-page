@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
-import { startAcceptedProposal } from "@/lib/reading-progress";
+import { manualAdvanceIfAllowed, startAcceptedProposal } from "@/lib/reading-progress";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import type { Profile } from "@/lib/types";
 
@@ -288,15 +288,11 @@ export async function POST(request: NextRequest) {
         const bookId = asString(payload.bookId);
         const note = asString(payload.note);
         if (!bookId) throw new Error("책을 골라 주세요");
-        const { data: acceptedProposal, error: acceptedProposalError } = await supabaseAdmin
+        const { error: cancelError } = await supabaseAdmin
           .from("book_proposals")
-          .select("id")
-          .eq("status", "accepted")
-          .limit(1)
-          .maybeSingle();
-        if (acceptedProposalError) throw acceptedProposalError;
-        if (acceptedProposal) throw new Error("이미 다음 책이 정해져 있어요");
-        await supabaseAdmin.from("book_proposals").update({ status: "cancelled", cancelled_at: now }).eq("status", "pending");
+          .update({ status: "cancelled", cancelled_at: now })
+          .in("status", ["pending", "accepted"]);
+        if (cancelError) throw cancelError;
         const { data, error } = await supabaseAdmin
           .from("book_proposals")
           .insert({ proposed_book_id: bookId, proposed_by: actor.id, note: note || null, status: "pending" })
@@ -341,6 +337,16 @@ export async function POST(request: NextRequest) {
           break;
         }
         await notifyOthers(actor, "book_accepted", `${actor.display_name}이 다음 책을 수락했어요`, "지금 읽는 책이 끝난 다음 날 1장이 열려요.", "book_proposal", proposal.id);
+        break;
+      }
+
+      case "manual_advance": {
+        const result = await manualAdvanceIfAllowed(actor.id);
+        if (result.segmentId) {
+          await notifyOthers(actor, "reading_advanced", `${actor.display_name}이 다음 범위를 열었어요`, "다음 읽기 범위가 열렸어요.", "segment", result.segmentId);
+        } else {
+          await notifyOthers(actor, "reading_advanced", `${actor.display_name}이 책을 마쳤어요`, "다음 책을 고를 차례예요.", "book_proposal");
+        }
         break;
       }
 

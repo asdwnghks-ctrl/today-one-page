@@ -162,6 +162,11 @@ export type VerseCount = {
   verse_count: number;
 };
 
+export type ManualAdvanceState = {
+  available: boolean;
+  missedProfileIds: string[];
+};
+
 export type AppState = {
   me: Profile | null;
   profiles: Profile[];
@@ -181,6 +186,7 @@ export type AppState = {
   verseCounts: VerseCount[];
   missCounts: Record<string, number>;
   revealedGiftMissCounts: Record<string, Record<string, number>>;
+  manualAdvance: ManualAdvanceState;
   myGift: BookGift | null;
   partnerHasGift: boolean;
   revealedGifts: BookGift[];

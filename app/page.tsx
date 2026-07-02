@@ -12,8 +12,10 @@ import {
   Library,
   MessageCircle,
   Pencil,
+  RefreshCw,
   Send,
   Sparkles,
+  SkipForward,
   Trash2,
   X,
 } from "lucide-react";
@@ -692,6 +694,10 @@ function TodayView({
   const bothRead = myRead && otherRead;
   const comments = state.comments.filter((item) => item.segment_id === segment.id);
   const highlights = state.highlights.filter((item) => item.segment_id === segment.id);
+  const missedProfiles = state.manualAdvance.missedProfileIds
+    .map((profileId) => state.profiles.find((profile) => profile.id === profileId)?.display_name)
+    .filter((name): name is string => Boolean(name));
+  const showManualAdvance = missedProfiles.length > 0;
 
   return (
     <div className="space-y-5">
@@ -703,9 +709,13 @@ function TodayView({
           <span style={{ color: me.accent_color }}>{segment.book_name}</span> {segment.chapter}장
         </h2>
         <p className="mt-2 text-sm text-[#8B7088]">
-          {bothRead ? "오늘은 둘 다 읽었어요. 새벽 2시에 다음 범위가 열려요." : "여유 있을 때 천천히, 함께."}
+          {showManualAdvance
+            ? `${missedProfiles.join(", ")}님이 전날 못 읽어서 멈춰 있어요.`
+            : bothRead
+              ? "오늘은 둘 다 읽었어요. 새벽 2시에 다음 범위가 열려요."
+              : "여유 있을 때 천천히, 함께."}
         </p>
-        <div className="mt-6 grid gap-3 sm:grid-cols-2">
+        <div className={`mt-6 grid gap-3 ${showManualAdvance ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
           <a
             href={segment.jw_url ?? undefined}
             target="_blank"
@@ -723,6 +733,17 @@ function TodayView({
           >
             {myRead ? "읽음 체크 완료" : "다 읽었어요"}
           </button>
+          {showManualAdvance && (
+            <button
+              disabled={!state.manualAdvance.available}
+              onClick={() => action(() => apiAction("manual_advance"))}
+              className="inline-flex items-center justify-center gap-2 rounded-2xl border px-4 py-4 text-sm font-bold disabled:cursor-default disabled:opacity-50"
+              style={{ borderColor: me.accent_color, color: me.accent_color }}
+            >
+              <SkipForward size={16} />
+              {state.manualAdvance.available ? "다음 범위 열기" : "읽음 체크 후 열기"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -1483,21 +1504,72 @@ function ReadOnlyEntryCard({
   );
 }
 
+function getBookIdsWithReadingRecord(state: AppState) {
+  const bookIds = new Set<string>();
+  const segmentBookIds = new Map(state.segments.map((segment) => [segment.id, segment.book_id]));
+
+  if (state.progress?.initial_book_id) bookIds.add(state.progress.initial_book_id);
+  if (state.progress?.current_book_id) bookIds.add(state.progress.current_book_id);
+  for (const readingState of state.readingStates) {
+    const bookId = segmentBookIds.get(readingState.segment_id);
+    if (bookId) bookIds.add(bookId);
+  }
+  for (const proposal of state.proposals) {
+    if (proposal.status === "started") bookIds.add(proposal.proposed_book_id);
+  }
+
+  return bookIds;
+}
+
 function ProposalCard({ state, me, action, compact }: { state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void>; compact?: boolean }) {
-  const [bookId, setBookId] = useState("ecc");
-  const [note, setNote] = useState("");
-  const [localProposal, setLocalProposal] = useState<{ status: "pending" | "accepted"; proposed_book_id: string; proposed_by: string; note: string | null } | null>(null);
   const pending = state.proposals.find((item) => item.status === "pending");
   const accepted = state.proposals.find((item) => item.status === "accepted");
-  const activePending = pending ?? (localProposal?.status === "pending" ? localProposal : null);
-  const activeAccepted = accepted ?? (localProposal?.status === "accepted" ? localProposal : null);
+  const readBookIds = useMemo(() => getBookIdsWithReadingRecord(state), [state]);
+  const defaultBookId = useMemo(() => {
+    const activeProposalBookIds = new Set([pending?.proposed_book_id, accepted?.proposed_book_id].filter((id): id is string => Boolean(id)));
+    return (
+      state.books.find((book) => !readBookIds.has(book.id) && !activeProposalBookIds.has(book.id))?.id ??
+      state.books.find((book) => book.id !== state.progress?.current_book_id)?.id ??
+      state.books[0]?.id ??
+      ""
+    );
+  }, [accepted?.proposed_book_id, pending?.proposed_book_id, readBookIds, state.books, state.progress?.current_book_id]);
+  const [bookId, setBookId] = useState(defaultBookId);
+  const [note, setNote] = useState("");
+  const [editingProposal, setEditingProposal] = useState(false);
+  const [localProposal, setLocalProposal] = useState<{ status: "pending" | "accepted"; proposed_book_id: string; proposed_by: string; note: string | null } | null>(null);
+  const localPending = localProposal?.status === "pending" ? localProposal : null;
+  const localAccepted = localProposal?.status === "accepted" ? localProposal : null;
+  const activePending = localAccepted ? null : localPending ?? pending;
+  const activeAccepted = localAccepted ?? accepted;
   const pendingBook = state.books.find((book) => book.id === activePending?.proposed_book_id);
   const acceptedBook = state.books.find((book) => book.id === activeAccepted?.proposed_book_id);
   const proposedByMe = activePending?.proposed_by === me.id;
+  const showProposalForm = (!activePending && (!activeAccepted || editingProposal)) || Boolean(activePending && proposedByMe && editingProposal);
 
   useEffect(() => {
     setLocalProposal(null);
+    setEditingProposal(false);
   }, [pending?.id, accepted?.id]);
+
+  useEffect(() => {
+    if (!bookId && defaultBookId) setBookId(defaultBookId);
+  }, [bookId, defaultBookId]);
+
+  const openProposalForm = () => {
+    setBookId(defaultBookId);
+    setEditingProposal(true);
+  };
+
+  const submitProposal = () => {
+    const nextBookId = bookId || defaultBookId;
+    if (!nextBookId) return;
+    const nextNote = note.trim();
+    setLocalProposal({ status: "pending", proposed_book_id: nextBookId, proposed_by: me.id, note: nextNote || null });
+    setEditingProposal(false);
+    setNote("");
+    void action(() => apiAction("propose_book", { bookId: nextBookId, note: nextNote }));
+  };
 
   return (
     <div className={`card mt-4 rounded-3xl p-4 ${compact ? "" : "sticky top-5"}`}>
@@ -1507,7 +1579,13 @@ function ProposalCard({ state, me, action, compact }: { state: AppState; me: Pro
           <p className="font-bold">{pendingBook?.name} 제안 중</p>
           <p className="mt-1 text-[#8B7088]">{activePending.note || "같이 읽어볼까요?"}</p>
           {proposedByMe ? (
-            <p className="mt-3 text-xs text-[#A89AA0]">상대의 수락을 기다리는 중이에요.</p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <p className="text-xs text-[#A89AA0]">상대의 수락을 기다리는 중이에요.</p>
+              <button onClick={openProposalForm} className="inline-flex items-center gap-1 rounded-xl bg-white px-3 py-2 text-xs font-bold text-[#8B7088]">
+                <RefreshCw size={13} />
+                다른 책 제안
+              </button>
+            </div>
           ) : (
             <button
               onClick={() => {
@@ -1526,23 +1604,25 @@ function ProposalCard({ state, me, action, compact }: { state: AppState; me: Pro
         <div className="mt-3 rounded-2xl bg-[#FFF8F1] p-3 text-sm">
           <p className="font-bold">{acceptedBook?.name} 확정</p>
           <p className="mt-1 text-[#8B7088]">지금 읽는 책이 끝난 다음 날 1장이 열려요.</p>
+          <button onClick={openProposalForm} className="mt-3 inline-flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-sm font-bold text-[#8B7088]">
+            <RefreshCw size={14} />
+            다른 책 제안하기
+          </button>
         </div>
-      ) : (
+      ) : null}
+
+      {showProposalForm && (
         <div className="mt-3 space-y-2">
           <select value={bookId} onChange={(event) => setBookId(event.target.value)} className="w-full rounded-xl border border-[#F2DCE5] bg-white px-3 py-2 text-sm">
             {state.books.map((book) => (
-              <option key={book.id} value={book.id}>{book.name}</option>
+              <option key={book.id} value={book.id}>{book.name}{readBookIds.has(book.id) ? " (읽은 기록 있음)" : ""}</option>
             ))}
           </select>
           <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="짧은 제안 메모" className="w-full rounded-xl border border-[#F2DCE5] px-3 py-2 text-sm" />
           <button
-            onClick={() => {
-              const nextNote = note.trim();
-              setLocalProposal({ status: "pending", proposed_book_id: bookId, proposed_by: me.id, note: nextNote || null });
-              setNote("");
-              void action(() => apiAction("propose_book", { bookId, note: nextNote }));
-            }}
-            className="w-full rounded-xl px-3 py-2 text-sm font-bold text-white"
+            disabled={!bookId && !defaultBookId}
+            onClick={submitProposal}
+            className="w-full rounded-xl px-3 py-2 text-sm font-bold text-white disabled:cursor-default disabled:opacity-50"
             style={{ background: me.accent_color }}
           >
             제안하기

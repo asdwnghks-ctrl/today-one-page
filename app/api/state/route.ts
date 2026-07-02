@@ -42,6 +42,7 @@ export async function GET() {
       verseCounts: [],
       missCounts: {},
       revealedGiftMissCounts: {},
+      manualAdvance: { available: false, missedProfileIds: [] },
       myGift: null,
       partnerHasGift: false,
       revealedGifts: [],
@@ -85,6 +86,7 @@ export async function GET() {
   // miss counts (현재 책 session 기준)
   let missCounts: Record<string, number> = {};
   let revealedGiftMissCounts: Record<string, Record<string, number>> = {};
+  let manualAdvance = { available: false, missedProfileIds: [] as string[] };
   let myGift = null;
   let partnerHasGift = false;
   let revealedGifts: { session_id: string; profile_id: string; is_revealed: boolean }[] = [];
@@ -93,7 +95,7 @@ export async function GET() {
     const profileIds = (profilesRes.data ?? []).map((p) => p.id);
     const currentMissesQuery = supabaseAdmin
       .from("reading_misses")
-      .select("profile_id")
+      .select("segment_id,profile_id")
       .eq("session_id", progress.session_id)
       .in("profile_id", profileIds);
     const [missesRes, giftsRes, revealedGiftsRes] = await Promise.all([
@@ -118,7 +120,7 @@ export async function GET() {
     if (isMissingSessionIdColumn(missesRes.error)) {
       const { data: legacyMisses, error: legacyMissesError } = await supabaseAdmin
         .from("reading_misses")
-        .select("profile_id")
+        .select("segment_id,profile_id")
         .in("profile_id", profileIds);
       if (legacyMissesError) return NextResponse.json({ error: legacyMissesError.message }, { status: 500 });
       currentMisses = legacyMisses ?? [];
@@ -127,6 +129,21 @@ export async function GET() {
     for (const miss of currentMisses) {
       missCounts[miss.profile_id] = (missCounts[miss.profile_id] ?? 0) + 1;
     }
+
+    const missedProfileIds = Array.from(
+      new Set(
+        currentMisses
+          .filter((miss) => miss.segment_id === progress.current_segment_id)
+          .map((miss) => miss.profile_id),
+      ),
+    );
+    const meHasReadCurrentSegment = (statesRes.data ?? []).some(
+      (state) => state.segment_id === progress.current_segment_id && state.profile_id === me.id,
+    );
+    manualAdvance = {
+      available: missedProfileIds.length > 0 && meHasReadCurrentSegment,
+      missedProfileIds,
+    };
 
     const gifts = giftsRes.data ?? [];
     myGift = gifts.find((g) => g.profile_id === me.id && !g.is_revealed) ?? null;
@@ -230,6 +247,7 @@ export async function GET() {
     verseCounts: verseCountsRes.data ?? [],
     missCounts,
     revealedGiftMissCounts,
+    manualAdvance,
     myGift,
     partnerHasGift,
     revealedGifts,
