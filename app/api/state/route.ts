@@ -7,6 +7,24 @@ function isMissingSessionIdColumn(error: { code?: string; message?: string } | n
   return error?.code === "42703" || error?.message?.includes("reading_misses.session_id");
 }
 
+// The hosted project caps PostgREST responses at 1000 rows regardless of the
+// requested range, so segments (1189 rows) has to be paged through manually.
+async function fetchAllSegments() {
+  const pageSize = 1000;
+  const rows: Record<string, unknown>[] = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabaseAdmin
+      .from("segments")
+      .select("*")
+      .order("global_order")
+      .range(from, from + pageSize - 1);
+    if (error) return { data: null, error };
+    rows.push(...(data ?? []));
+    if (!data || data.length < pageSize) break;
+  }
+  return { data: rows, error: null };
+}
+
 const LOGGED_OUT_STATE = {
   me: null,
   profiles: [],
@@ -82,7 +100,7 @@ export async function GET() {
   ] = await Promise.all([
     supabaseAdmin.from("sections").select("*").order("sort_order"),
     supabaseAdmin.from("books").select("*").order("sort_order"),
-    supabaseAdmin.from("segments").select("*").order("global_order"),
+    fetchAllSegments(),
     supabaseAdmin.from("reading_progress").select("*").eq("group_id", groupId).maybeSingle(),
     supabaseAdmin
       .from("reading_states")

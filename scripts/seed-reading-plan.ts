@@ -14,6 +14,25 @@ const supabase = createClient(supabaseUrl, secretKey, {
   auth: { persistSession: false },
 });
 
+// The hosted project caps PostgREST responses at 1000 rows regardless of the
+// requested range, so tables larger than that (segments has 1189 rows) need
+// to be paged through manually.
+async function fetchAllRows<T>(table: string, columns: string, orderBy: string): Promise<T[]> {
+  const pageSize = 1000;
+  const rows: T[] = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .order(orderBy)
+      .range(from, from + pageSize - 1);
+    if (error) throw new Error(error.message);
+    rows.push(...((data ?? []) as T[]));
+    if (!data || data.length < pageSize) break;
+  }
+  return rows;
+}
+
 // JW "성경 읽기 계획표" (sbr, 2009 Watch Tower) — canonical order, Genesis -> Revelation.
 // Each entry is one reading day: "book start-end" or, for days that combine two short
 // books, "book1 s-e;book2 s-e" (segments are concatenated in that order).
@@ -110,12 +129,12 @@ async function main() {
   if (booksError) throw new Error(booksError.message);
   const chapterCountByBook = new Map((books ?? []).map((b) => [b.id, b.chapter_count]));
 
-  const { data: segments, error: segmentsError } = await supabase
-    .from("segments")
-    .select("id,book_id,chapter,global_order")
-    .order("global_order");
-  if (segmentsError) throw new Error(segmentsError.message);
-  const segmentByBookChapter = new Map((segments ?? []).map((s) => [`${s.book_id}:${s.chapter}`, s]));
+  const segments = await fetchAllRows<{ id: string; book_id: string; chapter: number; global_order: number }>(
+    "segments",
+    "id,book_id,chapter,global_order",
+    "global_order",
+  );
+  const segmentByBookChapter = new Map(segments.map((s) => [`${s.book_id}:${s.chapter}`, s]));
 
   const rows: { day_index: number; book_id: string; segment_ids: string[] }[] = [];
   const seenBookChapters = new Map<string, Set<number>>();
@@ -156,7 +175,7 @@ async function main() {
   // Validate global order is strictly increasing (no skipped/reordered books) and every
   // segment is used exactly once across the whole plan.
   const totalSegments = allGlobalOrders.length;
-  const expectedTotal = (segments ?? []).length;
+  const expectedTotal = segments.length;
   if (totalSegments !== expectedTotal) {
     throw new Error(`Plan covers ${totalSegments} segments but the Bible has ${expectedTotal}`);
   }
