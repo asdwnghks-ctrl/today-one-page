@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
+import { clearSessionCookies } from "@/lib/session";
 
 export async function POST() {
   const response = NextResponse.json({ ok: true });
-  response.cookies.delete("top_profile");
+  clearSessionCookies(response);
   return response;
 }

@@ -1,6 +1,6 @@
-import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { manualAdvanceIfAllowed, startAcceptedProposal } from "@/lib/reading-progress";
+import { requireSessionProfile } from "@/lib/session";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import type { Profile } from "@/lib/types";
 
@@ -8,20 +8,6 @@ type ActionBody = {
   type: string;
   payload?: Record<string, unknown>;
 };
-
-async function getCurrentProfile() {
-  const cookieStore = await cookies();
-  const slug = cookieStore.get("top_profile")?.value;
-  if (!slug) throw new Error("로그인이 필요해요");
-
-  const { data, error } = await supabaseAdmin
-    .from("profiles")
-    .select("id,slug,display_name,color_key,accent_color,accent_deep,accent_soft")
-    .eq("slug", slug)
-    .single();
-  if (error || !data) throw new Error("사용자를 찾지 못했어요");
-  return data as Profile;
-}
 
 function asString(value: unknown, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
@@ -39,6 +25,7 @@ async function notifyOthers(actor: Profile, type: string, title: string, body?: 
   const { data: others, error } = await supabaseAdmin
     .from("profiles")
     .select("id")
+    .eq("group_id", actor.group_id)
     .neq("id", actor.id);
   if (error) throw error;
   if (!others?.length) return;
@@ -55,8 +42,8 @@ async function notifyOthers(actor: Profile, type: string, title: string, body?: 
   if (insertError) throw insertError;
 }
 
-async function getCurrentProgress() {
-  const { data, error } = await supabaseAdmin.from("reading_progress").select("*").limit(1).single();
+async function getCurrentProgress(groupId: string) {
+  const { data, error } = await supabaseAdmin.from("reading_progress").select("*").eq("group_id", groupId).single();
   if (error) throw error;
   return data;
 }
@@ -71,26 +58,26 @@ async function verifyOwner(table: string, id: string, profileId: string, ownerCo
 
 export async function POST(request: NextRequest) {
   try {
-    const actor = await getCurrentProfile();
+    const actor = await requireSessionProfile();
     const body = (await request.json()) as ActionBody;
     const payload = body.payload ?? {};
     const now = new Date().toISOString();
 
     switch (body.type) {
       case "check_read": {
-        const segmentId = asString(payload.segmentId);
-        if (!segmentId) throw new Error("segmentId가 필요해요");
-        const { error } = await supabaseAdmin.from("reading_states").upsert(
-          {
-            segment_id: segmentId,
-            profile_id: actor.id,
-            checked_at: now,
-            updated_at: now,
-          },
-          { onConflict: "segment_id,profile_id" },
-        );
+        const segmentIds = asStringArray(payload.segmentIds);
+        const singleSegmentId = asString(payload.segmentId);
+        const allSegmentIds = segmentIds.length ? segmentIds : singleSegmentId ? [singleSegmentId] : [];
+        if (!allSegmentIds.length) throw new Error("segmentId가 필요해요");
+        const rows = allSegmentIds.map((segmentId) => ({
+          segment_id: segmentId,
+          profile_id: actor.id,
+          checked_at: now,
+          updated_at: now,
+        }));
+        const { error } = await supabaseAdmin.from("reading_states").upsert(rows, { onConflict: "segment_id,profile_id" });
         if (error) throw error;
-        await notifyOthers(actor, "reading_checked", `${actor.display_name}이 읽었어요`, "같이 읽던 장에 읽음 체크가 되었어요.", "segment", segmentId);
+        await notifyOthers(actor, "reading_checked", `${actor.display_name}이 읽었어요`, "같이 읽던 장에 읽음 체크가 되었어요.", "segment", allSegmentIds[0]);
         break;
       }
 
@@ -227,63 +214,6 @@ export async function POST(request: NextRequest) {
         break;
       }
 
-      case "send_message": {
-        const bodyText = asString(payload.body);
-        if (!bodyText) throw new Error("메시지를 입력해 주세요");
-        const { data, error } = await supabaseAdmin
-          .from("messages")
-          .insert({ sender_id: actor.id, body: bodyText })
-          .select("id")
-          .single();
-        if (error) throw error;
-        await notifyOthers(actor, "message", `${actor.display_name}의 새 메시지`, bodyText.slice(0, 80), "message", data.id);
-        return NextResponse.json({ ok: true, id: data.id });
-      }
-
-      case "update_message": {
-        const id = asString(payload.id);
-        await verifyOwner("messages", id, actor.id, "sender_id");
-        const { error } = await supabaseAdmin.from("messages").update({ body: asString(payload.body), edited_at: now }).eq("id", id);
-        if (error) throw error;
-        break;
-      }
-
-      case "delete_message": {
-        const id = asString(payload.id);
-        await verifyOwner("messages", id, actor.id, "sender_id");
-        const { error } = await supabaseAdmin.from("messages").update({ deleted_at: now }).eq("id", id);
-        if (error) throw error;
-        const { error: notificationError } = await supabaseAdmin
-          .from("notifications")
-          .delete()
-          .eq("target_type", "message")
-          .eq("target_id", id);
-        if (notificationError) throw notificationError;
-        break;
-      }
-
-      case "mark_messages_read": {
-        const { data: messages, error } = await supabaseAdmin
-          .from("messages")
-          .select("id")
-          .neq("sender_id", actor.id)
-          .is("deleted_at", null);
-        if (error) throw error;
-        const rows = (messages ?? []).map((message) => ({ message_id: message.id, profile_id: actor.id, read_at: now }));
-        if (rows.length) {
-          const { error: readError } = await supabaseAdmin.from("message_reads").upsert(rows, { onConflict: "message_id,profile_id" });
-          if (readError) throw readError;
-        }
-        const { error: notificationError } = await supabaseAdmin
-          .from("notifications")
-          .update({ read_at: now })
-          .eq("profile_id", actor.id)
-          .eq("type", "message")
-          .is("read_at", null);
-        if (notificationError) throw notificationError;
-        break;
-      }
-
       case "propose_book": {
         const bookId = asString(payload.bookId);
         const note = asString(payload.note);
@@ -291,11 +221,12 @@ export async function POST(request: NextRequest) {
         const { error: cancelError } = await supabaseAdmin
           .from("book_proposals")
           .update({ status: "cancelled", cancelled_at: now })
+          .eq("group_id", actor.group_id)
           .in("status", ["pending", "accepted"]);
         if (cancelError) throw cancelError;
         const { data, error } = await supabaseAdmin
           .from("book_proposals")
-          .insert({ proposed_book_id: bookId, proposed_by: actor.id, note: note || null, status: "pending" })
+          .insert({ group_id: actor.group_id, proposed_book_id: bookId, proposed_by: actor.id, note: note || null, status: "pending" })
           .select("id")
           .single();
         if (error) throw error;
@@ -307,6 +238,7 @@ export async function POST(request: NextRequest) {
         const proposalId = asString(payload.id);
         const { data: proposal, error: proposalError } = await supabaseAdmin.from("book_proposals").select("*").eq("id", proposalId).single();
         if (proposalError) throw proposalError;
+        if (proposal.group_id !== actor.group_id) throw new Error("잘못된 제안이에요");
         if (proposal.status !== "pending") throw new Error("이미 처리된 제안이에요");
         if (proposal.proposed_by === actor.id) throw new Error("상대가 수락해야 해요");
         const { error: segmentError } = await supabaseAdmin
@@ -316,10 +248,11 @@ export async function POST(request: NextRequest) {
           .eq("chapter", 1)
           .single();
         if (segmentError) throw segmentError;
-        const progress = await getCurrentProgress();
+        const progress = await getCurrentProgress(actor.group_id);
         const { data: acceptedProposal, error: acceptedProposalError } = await supabaseAdmin
           .from("book_proposals")
           .select("id")
+          .eq("group_id", actor.group_id)
           .eq("status", "accepted")
           .neq("id", proposalId)
           .limit(1)
@@ -341,7 +274,7 @@ export async function POST(request: NextRequest) {
       }
 
       case "manual_advance": {
-        const result = await manualAdvanceIfAllowed(actor.id);
+        const result = await manualAdvanceIfAllowed(actor.group_id, actor.id);
         if (result.segmentId) {
           await notifyOthers(actor, "reading_advanced", `${actor.display_name}이 다음 범위를 열었어요`, "다음 읽기 범위가 열렸어요.", "segment", result.segmentId);
         } else {
@@ -353,7 +286,7 @@ export async function POST(request: NextRequest) {
       case "set_gift": {
         const giftDescription = asString(payload.giftDescription);
         if (!giftDescription) throw new Error("선물 내용을 입력해 주세요");
-        const progress = await getCurrentProgress();
+        const progress = await getCurrentProgress(actor.group_id);
         if (!progress.session_id) throw new Error("진행 중인 책이 없어요");
         const { error } = await supabaseAdmin
           .from("book_gifts")

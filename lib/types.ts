@@ -6,6 +6,23 @@ export type Profile = {
   accent_color: string;
   accent_deep: string;
   accent_soft: string;
+  group_id: string;
+};
+
+export type Group = {
+  id: string;
+  name: string;
+  invite_code: string;
+  owner_id: string | null;
+  max_members: number;
+  reading_mode: "daily_one" | "plan";
+  created_at: string;
+};
+
+export type PlanDay = {
+  day_index: number;
+  book_id: string;
+  segment_ids: string[];
 };
 
 export type Section = {
@@ -47,6 +64,7 @@ export type ReadingProgress = {
   completed_at: string | null;
   updated_at: string;
   session_id: string;
+  plan_day_index: number | null;
 };
 
 export type ReadingMiss = {
@@ -117,22 +135,6 @@ export type Reaction = {
   emoji: string;
 };
 
-export type Message = {
-  id: string;
-  sender_id: string;
-  body: string;
-  created_at: string;
-  edited_at: string | null;
-  deleted_at: string | null;
-};
-
-export type MessageRead = {
-  id: string;
-  message_id: string;
-  profile_id: string;
-  read_at: string;
-};
-
 export type Notification = {
   id: string;
   profile_id: string;
@@ -170,6 +172,8 @@ export type ManualAdvanceState = {
 export type AppState = {
   me: Profile | null;
   profiles: Profile[];
+  readingMode: "daily_one" | "plan";
+  planDay: PlanDay | null;
   sections: Section[];
   books: Book[];
   segments: Segment[];
@@ -179,8 +183,6 @@ export type AppState = {
   comments: SegmentComment[];
   replies: Reply[];
   reactions: Reaction[];
-  messages: Message[];
-  messageReads: MessageRead[];
   notifications: Notification[];
   proposals: BookProposal[];
   verseCounts: VerseCount[];

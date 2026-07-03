@@ -2,11 +2,13 @@ import { supabaseAdmin } from "@/lib/supabase-admin";
 
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const GIFT_CYCLE_DAYS = 30;
 
 type ProgressForAdvance = {
   id: string;
   current_segment_id: string;
   session_id: string;
+  plan_day_index: number | null;
   updated_at?: string;
 };
 
@@ -19,6 +21,11 @@ type AdvanceResult = {
   segmentId: string | null;
 };
 
+type Group = {
+  id: string;
+  reading_mode: "daily_one" | "plan";
+};
+
 function isMissingSessionIdColumn(error: { code?: string; message?: string } | null) {
   return error?.code === "42703" || error?.message?.includes("reading_misses.session_id");
 }
@@ -29,6 +36,31 @@ export function getKstResetBoundary(now = new Date()) {
     Date.UTC(kstNow.getUTCFullYear(), kstNow.getUTCMonth(), kstNow.getUTCDate(), 2, 0, 0) - KST_OFFSET_MS;
 
   return new Date(now.getTime() < boundaryMs ? boundaryMs - DAY_MS : boundaryMs);
+}
+
+async function getGroup(groupId: string): Promise<Group> {
+  const { data, error } = await supabaseAdmin.from("groups").select("id,reading_mode").eq("id", groupId).single();
+  if (error) throw error;
+  return data as Group;
+}
+
+async function getPlanDay(dayIndex: number) {
+  const { data, error } = await supabaseAdmin
+    .from("plan_days")
+    .select("day_index,book_id,segment_ids")
+    .eq("day_index", dayIndex)
+    .maybeSingle();
+  if (error) throw error;
+  return data as { day_index: number; book_id: string; segment_ids: string[] } | null;
+}
+
+async function getRequiredSegmentIds(progress: ProgressForAdvance, group: Group): Promise<string[]> {
+  if (group.reading_mode === "plan") {
+    if (progress.plan_day_index == null) return [];
+    const day = await getPlanDay(progress.plan_day_index);
+    return day?.segment_ids ?? [];
+  }
+  return progress.current_segment_id ? [progress.current_segment_id] : [];
 }
 
 async function revealGiftsForSession(sessionId: string, profileIds: string[]) {
@@ -104,10 +136,11 @@ export async function startAcceptedProposal(
   return firstSegment;
 }
 
-async function getAcceptedProposal() {
+async function getAcceptedProposal(groupId: string) {
   const { data, error } = await supabaseAdmin
     .from("book_proposals")
     .select("id,proposed_book_id")
+    .eq("group_id", groupId)
     .eq("status", "accepted")
     .order("accepted_at", { ascending: false })
     .limit(1)
@@ -116,7 +149,7 @@ async function getAcceptedProposal() {
   return data as AcceptedProposal | null;
 }
 
-async function advanceProgress(progress: ProgressForAdvance, segmentId: string): Promise<AdvanceResult> {
+async function advanceProgress(progress: ProgressForAdvance, segmentId: string, groupId: string): Promise<AdvanceResult> {
   const { data: currentSegment, error: segmentError } = await supabaseAdmin
     .from("segments")
     .select("*")
@@ -148,12 +181,12 @@ async function advanceProgress(progress: ProgressForAdvance, segmentId: string):
   }
 
   // 책 완료 — gift 공개
-  const { data: profiles, error: profileError } = await supabaseAdmin.from("profiles").select("id");
+  const { data: profiles, error: profileError } = await supabaseAdmin.from("profiles").select("id").eq("group_id", groupId);
   if (profileError) throw profileError;
   const profileIds = (profiles ?? []).map((p) => p.id);
   await revealGiftsForSession(progress.session_id, profileIds);
 
-  const acceptedProposal = await getAcceptedProposal();
+  const acceptedProposal = await getAcceptedProposal(groupId);
   if (acceptedProposal) {
     const firstSegment = await startAcceptedProposal(progress, acceptedProposal, now);
     return { segmentId: firstSegment.id };
@@ -171,26 +204,69 @@ async function advanceProgress(progress: ProgressForAdvance, segmentId: string):
   return { segmentId: null };
 }
 
+async function advancePlanProgress(progress: ProgressForAdvance, groupId: string): Promise<AdvanceResult> {
+  const currentDayIndex = progress.plan_day_index ?? 1;
+  const nextDayIndex = currentDayIndex + 1;
+  const nextDay = await getPlanDay(nextDayIndex);
+  const now = new Date().toISOString();
+
+  const { data: profiles, error: profileError } = await supabaseAdmin.from("profiles").select("id").eq("group_id", groupId);
+  if (profileError) throw profileError;
+  const profileIds = (profiles ?? []).map((p) => p.id);
+
+  const completingGiftCycle = currentDayIndex % GIFT_CYCLE_DAYS === 0;
+  const newSessionId = completingGiftCycle || !nextDay ? crypto.randomUUID() : progress.session_id;
+  if (completingGiftCycle || !nextDay) {
+    await revealGiftsForSession(progress.session_id, profileIds);
+  }
+
+  if (!nextDay) {
+    const { error } = await supabaseAdmin
+      .from("reading_progress")
+      .update({ status: "completed", completed_at: now, updated_at: now, session_id: newSessionId })
+      .eq("id", progress.id);
+    if (error) throw error;
+    return { segmentId: null };
+  }
+
+  const { error } = await supabaseAdmin
+    .from("reading_progress")
+    .update({
+      plan_day_index: nextDayIndex,
+      current_book_id: nextDay.book_id,
+      current_segment_id: nextDay.segment_ids[0],
+      status: "reading",
+      updated_at: now,
+      session_id: newSessionId,
+    })
+    .eq("id", progress.id);
+  if (error) throw error;
+  return { segmentId: nextDay.segment_ids[0] };
+}
+
 async function recordMissesIfDue(
   progress: ProgressForAdvance,
   profiles: { id: string }[],
   checkedByProfile: Map<string, string>,
   boundary: Date,
+  requiredSegmentIds: string[],
 ) {
   const progressUpdatedAt = new Date((progress as { updated_at?: string }).updated_at ?? 0).getTime();
   if (progressUpdatedAt >= boundary.getTime()) return;
+  if (!requiredSegmentIds.length) return;
 
+  const missSegmentId = requiredSegmentIds[0];
   const { data: segment } = await supabaseAdmin
     .from("segments")
     .select("book_id")
-    .eq("id", progress.current_segment_id)
+    .eq("id", missSegmentId)
     .single();
 
   const unread = profiles.filter((p) => !checkedByProfile.has(p.id));
   if (!unread.length) return;
 
   const rows = unread.map((p) => ({
-    segment_id: progress.current_segment_id,
+    segment_id: missSegmentId,
     session_id: progress.session_id,
     profile_id: p.id,
     book_id: segment?.book_id ?? "",
@@ -211,19 +287,20 @@ async function recordMissesIfDue(
   if (error) throw error;
 }
 
-async function hasMissForCurrentSegment(progress: ProgressForAdvance) {
+async function hasMissForToday(progress: ProgressForAdvance, requiredSegmentIds: string[]) {
+  if (!requiredSegmentIds.length) return false;
   const { data, error } = await supabaseAdmin
     .from("reading_misses")
     .select("id")
     .eq("session_id", progress.session_id)
-    .eq("segment_id", progress.current_segment_id)
+    .in("segment_id", requiredSegmentIds)
     .limit(1);
 
   if (isMissingSessionIdColumn(error)) {
     const { data: legacyData, error: legacyError } = await supabaseAdmin
       .from("reading_misses")
       .select("id")
-      .eq("segment_id", progress.current_segment_id)
+      .in("segment_id", requiredSegmentIds)
       .limit(1);
     if (legacyError) throw legacyError;
     return (legacyData ?? []).length > 0;
@@ -233,62 +310,91 @@ async function hasMissForCurrentSegment(progress: ProgressForAdvance) {
   return (data ?? []).length > 0;
 }
 
-export async function manualAdvanceIfAllowed(profileId: string) {
+export async function manualAdvanceIfAllowed(groupId: string, profileId: string) {
   const { data: progress, error: progressError } = await supabaseAdmin
     .from("reading_progress")
     .select("*")
-    .limit(1)
+    .eq("group_id", groupId)
     .maybeSingle();
   if (progressError) throw progressError;
   if (!progress || progress.status !== "reading") throw new Error("진행 중인 읽기 범위가 없어요");
 
-  const { data: checkedState, error: checkedError } = await supabaseAdmin
-    .from("reading_states")
-    .select("id")
-    .eq("segment_id", progress.current_segment_id)
-    .eq("profile_id", profileId)
-    .not("checked_at", "is", null)
-    .maybeSingle();
-  if (checkedError) throw checkedError;
-  if (!checkedState) throw new Error("내 분량을 읽음 체크한 뒤에 넘어갈 수 있어요");
+  const group = await getGroup(groupId);
+  const requiredSegmentIds = await getRequiredSegmentIds(progress, group);
+  if (!requiredSegmentIds.length) throw new Error("진행 중인 읽기 범위가 없어요");
 
-  const hasMiss = await hasMissForCurrentSegment(progress);
+  const { data: checkedStates, error: checkedError } = await supabaseAdmin
+    .from("reading_states")
+    .select("segment_id")
+    .in("segment_id", requiredSegmentIds)
+    .eq("profile_id", profileId)
+    .not("checked_at", "is", null);
+  if (checkedError) throw checkedError;
+  const checkedCount = new Set((checkedStates ?? []).map((s) => s.segment_id)).size;
+  if (checkedCount < requiredSegmentIds.length) throw new Error("내 분량을 읽음 체크한 뒤에 넘어갈 수 있어요");
+
+  const hasMiss = await hasMissForToday(progress, requiredSegmentIds);
   if (!hasMiss) throw new Error("전날 못 읽은 사람이 있을 때만 넘어갈 수 있어요");
 
-  return advanceProgress(progress, progress.current_segment_id);
+  if (group.reading_mode === "plan") return advancePlanProgress(progress, groupId);
+  return advanceProgress(progress, progress.current_segment_id, groupId);
 }
 
-export async function advanceAfterDailyResetIfDue() {
+export async function advanceAfterDailyResetIfDue(groupId: string) {
   const { data: progress, error: progressError } = await supabaseAdmin
     .from("reading_progress")
     .select("*")
-    .limit(1)
+    .eq("group_id", groupId)
     .maybeSingle();
   if (progressError) throw progressError;
   if (!progress || progress.status !== "reading") return;
 
-  const { data: profiles, error: profileError } = await supabaseAdmin.from("profiles").select("id");
+  const group = await getGroup(groupId);
+  const requiredSegmentIds = await getRequiredSegmentIds(progress, group);
+  if (!requiredSegmentIds.length) return;
+
+  const { data: profiles, error: profileError } = await supabaseAdmin.from("profiles").select("id").eq("group_id", groupId);
   if (profileError) throw profileError;
   if (!profiles?.length) return;
 
   const { data: states, error: statesError } = await supabaseAdmin
     .from("reading_states")
-    .select("profile_id,checked_at")
-    .eq("segment_id", progress.current_segment_id)
+    .select("profile_id,segment_id,checked_at")
+    .in("segment_id", requiredSegmentIds)
     .not("checked_at", "is", null);
   if (statesError) throw statesError;
 
-  const checkedByProfile = new Map((states ?? []).map((state) => [state.profile_id, state.checked_at]));
+  const checkedSegmentsByProfile = new Map<string, Set<string>>();
+  const latestCheckedAtByProfile = new Map<string, string>();
+  for (const state of states ?? []) {
+    if (!checkedSegmentsByProfile.has(state.profile_id)) checkedSegmentsByProfile.set(state.profile_id, new Set());
+    checkedSegmentsByProfile.get(state.profile_id)!.add(state.segment_id);
+    const previous = latestCheckedAtByProfile.get(state.profile_id);
+    if (!previous || new Date(state.checked_at).getTime() > new Date(previous).getTime()) {
+      latestCheckedAtByProfile.set(state.profile_id, state.checked_at);
+    }
+  }
+
+  const checkedByProfile = new Map(
+    Array.from(checkedSegmentsByProfile.entries())
+      .filter(([, segmentIds]) => requiredSegmentIds.every((id) => segmentIds.has(id)))
+      .map(([profileId]) => [profileId, latestCheckedAtByProfile.get(profileId) as string]),
+  );
+
   const boundary = getKstResetBoundary();
   const allChecked = profiles.every((profile) => checkedByProfile.has(profile.id));
 
   if (!allChecked) {
-    await recordMissesIfDue(progress, profiles, checkedByProfile, boundary);
+    await recordMissesIfDue(progress, profiles, checkedByProfile, boundary, requiredSegmentIds);
     return;
   }
 
   const latestCheckedAt = Math.max(...Array.from(checkedByProfile.values()).map((value) => new Date(value).getTime()));
   if (latestCheckedAt >= boundary.getTime()) return;
 
-  await advanceProgress(progress, progress.current_segment_id);
+  if (group.reading_mode === "plan") {
+    await advancePlanProgress(progress, groupId);
+    return;
+  }
+  await advanceProgress(progress, progress.current_segment_id, groupId);
 }
