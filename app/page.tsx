@@ -1,19 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { flushSync } from "react-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bell,
   BookOpen,
   Check,
   ChevronLeft,
+  Copy,
   Heart,
   Home,
   Library,
-  MessageCircle,
   Pencil,
   RefreshCw,
-  Send,
   Sparkles,
   SkipForward,
   Trash2,
@@ -24,32 +22,16 @@ import type {
   Book,
   BookGift,
   Highlight,
-  Message,
   Profile,
   Reply,
   Segment,
   SegmentComment,
 } from "@/lib/types";
+import { MEMBER_COLOR_PALETTE } from "@/lib/color-palette";
 import { supabaseBrowser } from "@/lib/supabase-browser";
 
-type Tab = "today" | "reading" | "chat" | "records";
-
-const FALLBACK_PEOPLE = [
-  {
-    slug: "joohwan",
-    display_name: "주환",
-    accent_color: "#5F6F3E",
-    accent_deep: "#48552F",
-    accent_soft: "#E8E5D4",
-  },
-  {
-    slug: "heejin",
-    display_name: "희진",
-    accent_color: "#A93F62",
-    accent_deep: "#8F2F50",
-    accent_soft: "#FCE4EC",
-  },
-];
+type Tab = "today" | "reading" | "records";
+type AuthMode = "landing" | "enter-code" | "pick-profile" | "create-group" | "join-group";
 
 const HIGHLIGHT_COLORS = ["#F4B5C9", "#C8B5E8", "#B5D5E8", "#B8C49B"];
 
@@ -74,6 +56,22 @@ function shortDate(value?: string | null) {
   }).format(new Date(value));
 }
 
+function formatPlanRange(segments: Segment[]) {
+  const groups: { bookName: string; chapters: number[] }[] = [];
+  for (const seg of segments) {
+    const last = groups[groups.length - 1];
+    if (last && last.bookName === seg.book_name) last.chapters.push(seg.chapter);
+    else groups.push({ bookName: seg.book_name, chapters: [seg.chapter] });
+  }
+  return groups
+    .map((group) => {
+      const min = Math.min(...group.chapters);
+      const max = Math.max(...group.chapters);
+      return min === max ? `${group.bookName} ${min}장` : `${group.bookName} ${min}~${max}장`;
+    })
+    .join(" · ");
+}
+
 async function apiAction(type: string, payload?: Record<string, unknown>) {
   const response = await fetch("/api/action", {
     method: "POST",
@@ -94,13 +92,26 @@ export default function Page() {
   const [tab, setTab] = useState<Tab>("today");
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
   const [selectedBookId, setSelectedBookId] = useState<string>("ecc");
-  const [chatOpen, setChatOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [onlineProfileIds, setOnlineProfileIds] = useState<string[]>([]);
   const [realtimeStatus, setRealtimeStatus] = useState("CLOSED");
   const [loginPending, setLoginPending] = useState(false);
   const broadcastChangeRef = useRef<(() => void) | null>(null);
   const notificationMarkingRef = useRef(false);
+
+  const [authMode, setAuthMode] = useState<AuthMode>("landing");
+  const [authPending, setAuthPending] = useState(false);
+  const [lookup, setLookup] = useState<{
+    groupId: string;
+    groupName: string;
+    maxMembers: number;
+    profiles: Array<Pick<Profile, "id" | "slug" | "display_name" | "color_key" | "accent_color" | "accent_deep" | "accent_soft">>;
+  } | null>(null);
+  const [inviteCodeInput, setInviteCodeInput] = useState("");
+  const [groupNameInput, setGroupNameInput] = useState("");
+  const [yourNameInput, setYourNameInput] = useState("");
+  const [colorKeyInput, setColorKeyInput] = useState(MEMBER_COLOR_PALETTE[0].colorKey);
+  const [readingModeInput, setReadingModeInput] = useState<"daily_one" | "plan">("daily_one");
+  const [createdInviteCode, setCreatedInviteCode] = useState<string | null>(null);
 
   const fetchState = useCallback(async () => {
     const response = await fetch("/api/state", { cache: "no-store" });
@@ -121,13 +132,7 @@ export default function Page() {
     if (!state?.me) return;
 
     let refreshTimer: number | null = null;
-    const channel = supabaseBrowser.channel("today-one-page-live", {
-      config: {
-        presence: {
-          key: state.me.id,
-        },
-      },
-    });
+    const channel = supabaseBrowser.channel(`group-${state.me.group_id}-live`);
 
     const scheduleRefresh = () => {
       if (refreshTimer) window.clearTimeout(refreshTimer);
@@ -136,26 +141,9 @@ export default function Page() {
       }, 180);
     };
 
-    channel
-      .on("broadcast", { event: "state_changed" }, scheduleRefresh)
-      .on("presence", { event: "sync" }, () => {
-        const presence = channel.presenceState() as Record<string, Array<{ profileId?: string }>>;
-        const ids = Object.values(presence)
-          .flat()
-          .map((item) => item.profileId)
-          .filter((id): id is string => Boolean(id));
-        setOnlineProfileIds(Array.from(new Set(ids)));
-      })
-      .subscribe((status) => {
-        setRealtimeStatus(status);
-        if (status === "SUBSCRIBED") {
-          void channel.track({
-            profileId: state.me?.id,
-            displayName: state.me?.display_name,
-            onlineAt: new Date().toISOString(),
-          });
-        }
-      });
+    channel.on("broadcast", { event: "state_changed" }, scheduleRefresh).subscribe((status) => {
+      setRealtimeStatus(status);
+    });
 
     broadcastChangeRef.current = () => {
       void channel.send({
@@ -173,56 +161,15 @@ export default function Page() {
       broadcastChangeRef.current = null;
       void supabaseBrowser.removeChannel(channel);
     };
-  }, [fetchState, state?.me?.display_name, state?.me?.id]);
+  }, [fetchState, state?.me?.display_name, state?.me?.id, state?.me?.group_id]);
 
   const me = state?.me ?? null;
-  const profiles = state?.profiles?.length ? state.profiles : (FALLBACK_PEOPLE as Profile[]);
-  const other = state?.profiles.find((profile) => profile.id !== me?.id) ?? null;
+  const profiles = state?.profiles ?? [];
+  const others = profiles.filter((profile) => profile.id !== me?.id);
   const currentSegment = state?.segments.find((segment) => segment.id === state.progress?.current_segment_id) ?? null;
   const activeSegment = state?.segments.find((segment) => segment.id === selectedSegmentId) ?? currentSegment;
   const currentBook = state?.books.find((book) => book.id === state.progress?.current_book_id) ?? null;
   const unreadCount = state?.notifications.filter((item) => !item.read_at).length ?? 0;
-  const unreadMessages = useMemo(() => {
-    if (!state?.me) return 0;
-    const read = new Set(state.messageReads.filter((item) => item.profile_id === state.me?.id).map((item) => item.message_id));
-    return state.messages.filter((message) => message.sender_id !== state.me?.id && !message.deleted_at && !read.has(message.id)).length;
-  }, [state]);
-
-  const quietlyMarkMessagesRead = useCallback(async () => {
-    if (!state?.me || notificationMarkingRef.current) return;
-    const read = new Set(state.messageReads.filter((item) => item.profile_id === state.me?.id).map((item) => item.message_id));
-    const hasUnreadMessages = state.messages.some((message) => message.sender_id !== state.me?.id && !message.deleted_at && !read.has(message.id));
-    const hasUnreadMessageNotifications = state.notifications.some((item) => !item.read_at && item.type === "message");
-    if (!hasUnreadMessages && !hasUnreadMessageNotifications) return;
-
-    notificationMarkingRef.current = true;
-    const readAt = new Date().toISOString();
-    setState((prev) =>
-      prev
-        ? {
-            ...prev,
-            messageReads: [
-              ...prev.messageReads,
-              ...prev.messages
-                .filter((message) => message.sender_id !== prev.me?.id && !message.deleted_at)
-                .filter((message) => !prev.messageReads.some((item) => item.profile_id === prev.me?.id && item.message_id === message.id))
-                .map((message) => ({ id: `local-${message.id}`, message_id: message.id, profile_id: prev.me?.id ?? "", read_at: readAt })),
-            ],
-            notifications: prev.notifications.map((item) =>
-              !item.read_at && item.type === "message" ? { ...item, read_at: readAt } : item,
-            ),
-          }
-        : prev,
-    );
-    try {
-      await apiAction("mark_messages_read");
-      await fetchState();
-    } catch {
-      fetchState().catch(() => undefined);
-    } finally {
-      notificationMarkingRef.current = false;
-    }
-  }, [fetchState, state?.me, state?.messageReads, state?.messages, state?.notifications]);
 
   const quietlyMarkNotificationsRead = useCallback(
     async (types: string[]) => {
@@ -259,11 +206,6 @@ export default function Page() {
     void quietlyMarkNotificationsRead(["comment", "reply"]);
   }, [quietlyMarkNotificationsRead, tab]);
 
-  useEffect(() => {
-    if (tab !== "chat" && !chatOpen) return;
-    void quietlyMarkMessagesRead();
-  }, [chatOpen, quietlyMarkMessagesRead, tab]);
-
   async function refreshAfter(action: () => Promise<unknown>) {
     setError("");
     try {
@@ -288,20 +230,7 @@ export default function Page() {
     }
   }
 
-  async function sendChatMessage(body: string) {
-    setError("");
-    try {
-      await apiAction("send_message", { body });
-      await fetchState();
-      broadcastChangeRef.current?.();
-      return true;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "메시지를 보내지 못했어요");
-      return false;
-    }
-  }
-
-  async function login(slug: string) {
+  async function login(groupId: string, slug: string) {
     if (loginPending) return;
     setLoginPending(true);
     setError("");
@@ -309,7 +238,7 @@ export default function Page() {
       const response = await fetch("/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slug, pin }),
+        body: JSON.stringify({ groupId, slug, pin }),
       });
       const json = await response.json();
       if (!response.ok) {
@@ -327,28 +256,102 @@ export default function Page() {
     setState((prev) => (prev ? { ...prev, me: null } : prev));
     setTab("today");
     setSelectedSlug(null);
+    setAuthMode("landing");
+    setLookup(null);
     fetch("/api/logout", { method: "POST" }).catch(() => undefined);
   }
 
-  async function checkReadOptimistically(segmentId: string) {
-    if (!me) return;
+  async function createGroup() {
+    if (authPending) return;
+    setAuthPending(true);
+    setError("");
+    try {
+      const response = await fetch("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          groupName: groupNameInput,
+          yourName: yourNameInput,
+          colorKey: colorKeyInput,
+          pin,
+          readingMode: readingModeInput,
+        }),
+      });
+      const json = await response.json();
+      if (!response.ok) {
+        setError(json.error || "그룹을 만들지 못했어요");
+        return;
+      }
+      setPin("");
+      setCreatedInviteCode(json.inviteCode);
+      await fetchState();
+    } finally {
+      setAuthPending(false);
+    }
+  }
+
+  async function lookupInviteCode(code: string) {
+    if (authPending) return;
+    setAuthPending(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/groups/lookup?code=${encodeURIComponent(code)}`);
+      const json = await response.json();
+      if (!response.ok) {
+        setError(json.error || "초대 코드를 다시 확인해 주세요");
+        return;
+      }
+      setLookup(json);
+      setAuthMode("pick-profile");
+    } finally {
+      setAuthPending(false);
+    }
+  }
+
+  async function joinGroup() {
+    if (authPending || !lookup) return;
+    setAuthPending(true);
+    setError("");
+    try {
+      const response = await fetch("/api/join", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          inviteCode: inviteCodeInput,
+          yourName: yourNameInput,
+          colorKey: colorKeyInput,
+          pin,
+        }),
+      });
+      const json = await response.json();
+      if (!response.ok) {
+        setError(json.error || "그룹에 참여하지 못했어요");
+        return;
+      }
+      setPin("");
+      await fetchState();
+    } finally {
+      setAuthPending(false);
+    }
+  }
+
+  async function checkReadOptimistically(segmentIds: string[]) {
+    if (!me || !segmentIds.length) return;
     const checkedAt = new Date().toISOString();
     setState((prev) => {
-      if (!prev || prev.readingStates.some((item) => item.segment_id === segmentId && item.profile_id === me.id)) return prev;
-      return {
-        ...prev,
-        readingStates: [
-          ...prev.readingStates,
-          {
-            id: `local-${segmentId}-${me.id}`,
-            segment_id: segmentId,
-            profile_id: me.id,
-            checked_at: checkedAt,
-          },
-        ],
-      };
+      if (!prev) return prev;
+      const newRows = segmentIds
+        .filter((segmentId) => !prev.readingStates.some((item) => item.segment_id === segmentId && item.profile_id === me.id))
+        .map((segmentId) => ({
+          id: `local-${segmentId}-${me.id}`,
+          segment_id: segmentId,
+          profile_id: me.id,
+          checked_at: checkedAt,
+        }));
+      if (!newRows.length) return prev;
+      return { ...prev, readingStates: [...prev.readingStates, ...newRows] };
     });
-    await refreshAfter(() => apiAction("check_read", { segmentId }));
+    await refreshAfter(() => apiAction("check_read", { segmentIds }));
   }
 
   if (loading) {
@@ -360,68 +363,269 @@ export default function Page() {
   }
 
   if (!me) {
+    const header = (
+      <div className="mb-10 pt-16 text-center">
+        <div className="mb-5 inline-flex gap-2 text-[#A93F62]">
+          <Sparkles size={18} />
+          <Sparkles size={18} className="text-[#C8B5E8]" />
+          <Sparkles size={18} className="text-[#B5D5E8]" />
+        </div>
+        <h1 className="text-5xl font-black leading-tight tracking-normal">
+          오늘도<br />
+          <span className="text-[#A93F62]">한 페이지</span>
+        </h1>
+      </div>
+    );
+
+    if (createdInviteCode) {
+      return (
+        <main className="relative z-10 mx-auto flex min-h-screen max-w-[480px] flex-col px-6 py-10">
+          {header}
+          <div className="card rounded-2xl p-6 text-center">
+            <p className="text-sm text-[#8B7088]">그룹이 만들어졌어요!</p>
+            <p className="mt-3 text-3xl font-black tracking-[0.2em]">{createdInviteCode}</p>
+            <p className="mt-2 text-xs text-[#8B7088]">이 코드를 함께 읽을 사람에게 공유해 주세요.</p>
+            <div className="mt-4 flex justify-center gap-2">
+              <button
+                onClick={() => void navigator.clipboard?.writeText(createdInviteCode)}
+                className="inline-flex items-center gap-1 rounded-xl bg-white px-4 py-2 text-sm font-bold text-[#8B7088]"
+              >
+                <Copy size={14} /> 복사하기
+              </button>
+              <button
+                onClick={() => {
+                  setCreatedInviteCode(null);
+                  void fetchState();
+                }}
+                className="rounded-xl px-4 py-2 text-sm font-bold text-white"
+                style={{ background: "#A93F62" }}
+              >
+                시작하기
+              </button>
+            </div>
+          </div>
+        </main>
+      );
+    }
+
     return (
       <main className="relative z-10 mx-auto flex min-h-screen max-w-[480px] flex-col px-6 py-10">
-        <div className="mb-10 pt-16 text-center">
-          <div className="mb-5 inline-flex gap-2 text-[#A93F62]">
-            <Sparkles size={18} />
-            <Sparkles size={18} className="text-[#C8B5E8]" />
-            <Sparkles size={18} className="text-[#B5D5E8]" />
-          </div>
-          <h1 className="text-5xl font-black leading-tight tracking-normal">
-            오늘도<br />
-            <span className="text-[#A93F62]">한 페이지</span>
-          </h1>
-          <p className="mt-4 text-sm text-[#8B7088]">누구로 들어갈까요?</p>
-        </div>
+        {header}
 
-        <div className="space-y-3">
-          {profiles.map((person) => (
+        {authMode === "landing" && (
+          <div className="space-y-3">
             <button
-              key={person.slug}
               onClick={() => {
-                setSelectedSlug(person.slug);
                 setError("");
+                setAuthMode("create-group");
               }}
-              className="card focus-ring flex w-full items-center justify-between rounded-2xl px-5 py-4 text-left transition hover:-translate-y-0.5"
+              className="card focus-ring w-full rounded-2xl px-5 py-4 text-left transition hover:-translate-y-0.5"
             >
-              <span>
-                <span className="block text-lg font-bold" style={{ color: person.accent_color }}>
-                  {person.display_name}
-                </span>
-                <span className="text-xs text-[#8B7088]">들어가기</span>
-              </span>
-              <span className="h-3 w-3 rounded-full" style={{ background: person.accent_color }} />
+              <span className="block text-lg font-bold text-[#A93F62]">그룹 만들기</span>
+              <span className="text-xs text-[#8B7088]">새 그룹을 시작하고 초대코드를 받아요</span>
             </button>
-          ))}
-        </div>
+            <button
+              onClick={() => {
+                setError("");
+                setAuthMode("enter-code");
+              }}
+              className="card focus-ring w-full rounded-2xl px-5 py-4 text-left transition hover:-translate-y-0.5"
+            >
+              <span className="block text-lg font-bold text-[#5F6F3E]">초대코드로 들어가기</span>
+              <span className="text-xs text-[#8B7088]">이미 있는 그룹에 참여해요</span>
+            </button>
+          </div>
+        )}
 
-        {selectedSlug && (
-          <div className="card mt-5 rounded-2xl p-4">
-            <label className="text-xs font-bold text-[#8B7088]">비밀번호</label>
-            <div className="mt-2 flex gap-2">
+        {authMode === "enter-code" && (
+          <div className="space-y-3">
+            <BackButton onClick={() => setAuthMode("landing")} />
+            <div className="card rounded-2xl p-4">
+              <label className="text-xs font-bold text-[#8B7088]">초대코드</label>
               <input
-                value={pin}
-                onChange={(event) => setPin(event.target.value)}
+                value={inviteCodeInput}
+                onChange={(event) => setInviteCodeInput(event.target.value.toUpperCase())}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter") void login(selectedSlug);
+                  if (event.key === "Enter") void lookupInviteCode(inviteCodeInput);
                 }}
-                className="focus-ring min-w-0 flex-1 rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
-                inputMode="numeric"
-                type="password"
+                className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base tracking-[0.2em]"
                 autoFocus
               />
               <button
-                disabled={loginPending}
-                onClick={() => void login(selectedSlug)}
-                className="focus-ring inline-flex min-w-[72px] items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-80"
-                style={{ background: profiles.find((person) => person.slug === selectedSlug)?.accent_color ?? "#A93F62" }}
+                disabled={authPending || !inviteCodeInput.trim()}
+                onClick={() => void lookupInviteCode(inviteCodeInput)}
+                className="mt-3 w-full rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-60"
+                style={{ background: "#A93F62" }}
               >
-                {loginPending ? "확인 중" : "확인"}
+                {authPending ? "확인 중" : "확인"}
               </button>
             </div>
           </div>
         )}
+
+        {authMode === "create-group" && (
+          <div className="space-y-3">
+            <BackButton onClick={() => setAuthMode("landing")} />
+            <div className="card space-y-3 rounded-2xl p-4">
+              <div>
+                <label className="text-xs font-bold text-[#8B7088]">그룹 이름</label>
+                <input
+                  value={groupNameInput}
+                  onChange={(event) => setGroupNameInput(event.target.value)}
+                  placeholder="예: 주환♥희진"
+                  className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-[#8B7088]">내 이름</label>
+                <input
+                  value={yourNameInput}
+                  onChange={(event) => setYourNameInput(event.target.value)}
+                  className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
+                />
+              </div>
+              <ColorPicker value={colorKeyInput} onChange={setColorKeyInput} />
+              <div>
+                <label className="text-xs font-bold text-[#8B7088]">읽는 방식</label>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <ReadingModeOption
+                    active={readingModeInput === "daily_one"}
+                    title="하루 1장"
+                    description="같이 한 장씩, 천천히"
+                    onClick={() => setReadingModeInput("daily_one")}
+                  />
+                  <ReadingModeOption
+                    active={readingModeInput === "plan"}
+                    title="읽기 계획표"
+                    description="1년 성경 통독표대로"
+                    onClick={() => setReadingModeInput("plan")}
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-bold text-[#8B7088]">내 비밀번호 (4~8자)</label>
+                <input
+                  value={pin}
+                  onChange={(event) => setPin(event.target.value)}
+                  className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
+                  inputMode="numeric"
+                  type="password"
+                />
+              </div>
+              <button
+                disabled={authPending || !groupNameInput.trim() || !yourNameInput.trim() || pin.length < 4}
+                onClick={() => void createGroup()}
+                className="w-full rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-60"
+                style={{ background: "#A93F62" }}
+              >
+                {authPending ? "만드는 중" : "그룹 만들기"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {authMode === "pick-profile" && lookup && (
+          <div className="space-y-3">
+            <BackButton
+              onClick={() => {
+                setAuthMode("enter-code");
+                setLookup(null);
+                setSelectedSlug(null);
+              }}
+            />
+            <p className="text-center text-sm text-[#8B7088]">{lookup.groupName}</p>
+            {lookup.profiles.map((person) => (
+              <button
+                key={person.slug}
+                onClick={() => {
+                  setSelectedSlug(person.slug);
+                  setError("");
+                }}
+                className="card focus-ring flex w-full items-center justify-between rounded-2xl px-5 py-4 text-left transition hover:-translate-y-0.5"
+              >
+                <span>
+                  <span className="block text-lg font-bold" style={{ color: person.accent_color }}>
+                    {person.display_name}
+                  </span>
+                  <span className="text-xs text-[#8B7088]">들어가기</span>
+                </span>
+                <span className="h-3 w-3 rounded-full" style={{ background: person.accent_color }} />
+              </button>
+            ))}
+            {lookup.profiles.length < lookup.maxMembers && (
+              <button
+                onClick={() => setAuthMode("join-group")}
+                className="w-full rounded-xl bg-white px-4 py-3 text-sm font-bold text-[#8B7088]"
+              >
+                새 멤버로 참여하기
+              </button>
+            )}
+
+            {selectedSlug && (
+              <div className="card mt-2 rounded-2xl p-4">
+                <label className="text-xs font-bold text-[#8B7088]">비밀번호</label>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    value={pin}
+                    onChange={(event) => setPin(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void login(lookup.groupId, selectedSlug);
+                    }}
+                    className="focus-ring min-w-0 flex-1 rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
+                    inputMode="numeric"
+                    type="password"
+                    autoFocus
+                  />
+                  <button
+                    disabled={loginPending}
+                    onClick={() => void login(lookup.groupId, selectedSlug)}
+                    className="focus-ring inline-flex min-w-[72px] items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-80"
+                    style={{ background: lookup.profiles.find((person) => person.slug === selectedSlug)?.accent_color ?? "#A93F62" }}
+                  >
+                    {loginPending ? "확인 중" : "확인"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {authMode === "join-group" && lookup && (
+          <div className="space-y-3">
+            <BackButton onClick={() => setAuthMode("pick-profile")} />
+            <div className="card space-y-3 rounded-2xl p-4">
+              <p className="text-sm font-bold">{lookup.groupName}에 참여해요</p>
+              <div>
+                <label className="text-xs font-bold text-[#8B7088]">내 이름</label>
+                <input
+                  value={yourNameInput}
+                  onChange={(event) => setYourNameInput(event.target.value)}
+                  className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
+                />
+              </div>
+              <ColorPicker value={colorKeyInput} onChange={setColorKeyInput} usedColorKeys={lookup.profiles.map((p) => p.color_key)} />
+              <div>
+                <label className="text-xs font-bold text-[#8B7088]">내 비밀번호 (4~8자)</label>
+                <input
+                  value={pin}
+                  onChange={(event) => setPin(event.target.value)}
+                  className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
+                  inputMode="numeric"
+                  type="password"
+                />
+              </div>
+              <button
+                disabled={authPending || !yourNameInput.trim() || pin.length < 4}
+                onClick={() => void joinGroup()}
+                className="w-full rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-60"
+                style={{ background: "#5F6F3E" }}
+              >
+                {authPending ? "참여하는 중" : "참여하기"}
+              </button>
+            </div>
+          </div>
+        )}
+
         {error && <p className="mt-4 text-center text-sm text-[#A93F62]">{error}</p>}
       </main>
     );
@@ -444,10 +648,6 @@ export default function Page() {
             <Bell size={18} />
             {unreadCount > 0 && <Badge>{unreadCount}</Badge>}
           </IconButton>
-          <IconButton label="채팅" onClick={() => setChatOpen(true)}>
-            <MessageCircle size={18} />
-            {unreadMessages > 0 && <Badge>{unreadMessages}</Badge>}
-          </IconButton>
           <button onClick={() => void logout()} className="rounded-full px-3 py-2 text-xs text-[#8B7088] hover:bg-white/60">
             나가기
           </button>
@@ -466,10 +666,10 @@ export default function Page() {
             <TodayView
               state={appState}
               me={me}
-              other={other}
+              others={others}
               segment={currentSegment}
               book={currentBook}
-              onRead={() => checkReadOptimistically(currentSegment.id)}
+              onRead={(segmentIds) => checkReadOptimistically(segmentIds)}
               onOpenSegment={(id) => {
                 setSelectedSegmentId(id);
                 setTab("reading");
@@ -490,7 +690,6 @@ export default function Page() {
               proposalAction={refreshAfter}
             />
           )}
-          {tab === "chat" && <ChatView state={appState} me={me} action={refreshAfterSilently} onSendMessage={sendChatMessage} onlineProfileIds={onlineProfileIds} />}
           {tab === "records" && (
             <RecordsView
               state={appState}
@@ -505,24 +704,17 @@ export default function Page() {
         </section>
 
         <aside className="hidden lg:block">
-          <ProposalCard state={appState} me={me} action={refreshAfter} />
+          {appState.readingMode !== "plan" && <ProposalCard state={appState} me={me} action={refreshAfter} />}
         </aside>
       </div>
 
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-[#F2DCE5] bg-[#FFF8F1]/95 px-3 py-2 backdrop-blur">
-        <div className="mx-auto grid max-w-[520px] grid-cols-4 gap-2">
+        <div className="mx-auto grid max-w-[400px] grid-cols-3 gap-2">
           <TabButton active={tab === "today"} icon={<Home size={18} />} label="오늘" onClick={() => setTab("today")} />
           <TabButton active={tab === "reading"} icon={<BookOpen size={18} />} label="코멘트" onClick={() => setTab("reading")} />
-          <TabButton active={tab === "chat"} icon={<MessageCircle size={18} />} label="채팅" badge={unreadMessages} onClick={() => setTab("chat")} />
           <TabButton active={tab === "records"} icon={<Library size={18} />} label="기록" onClick={() => setTab("records")} />
         </div>
       </nav>
-
-      {chatOpen && (
-        <Drawer title="둘만의 대화" onClose={() => setChatOpen(false)}>
-          <ChatView state={appState} me={me} action={refreshAfterSilently} onSendMessage={sendChatMessage} onlineProfileIds={onlineProfileIds} compact />
-        </Drawer>
-      )}
 
       {notificationsOpen && (
         <Drawer title="알림" onClose={() => setNotificationsOpen(false)}>
@@ -534,7 +726,6 @@ export default function Page() {
                 setSelectedSegmentId(targetId);
                 setTab("records");
               }
-              if (targetType === "message") setTab("chat");
               setNotificationsOpen(false);
             }}
           />
@@ -547,37 +738,39 @@ export default function Page() {
   );
 }
 
-function MissScoreboard({ state, me, other }: { state: AppState; me: Profile; other: Profile | null }) {
+function MissScoreboard({ state, me, others }: { state: AppState; me: Profile; others: Profile[] }) {
   const myCount = state.missCounts[me.id] ?? 0;
-  const otherCount = other ? (state.missCounts[other.id] ?? 0) : 0;
-  if (myCount === 0 && otherCount === 0) return null;
+  const otherCounts = others.map((profile) => ({ profile, count: state.missCounts[profile.id] ?? 0 }));
+  const maxCount = Math.max(myCount, ...otherCounts.map((item) => item.count));
+  if (maxCount === 0) return null;
 
-  const myLosing = myCount > otherCount;
-  const otherLosing = other && otherCount > myCount;
+  const myLosing = myCount === maxCount;
 
   return (
     <div className="card rounded-3xl p-4">
       <h3 className="mb-3 text-sm font-black text-[#8B7088]">이번 책 못 읽기 점수</h3>
-      <div className="flex items-center justify-around gap-4">
+      <div className="flex flex-wrap items-center justify-around gap-4">
         <div className={`text-center ${myLosing ? "opacity-100" : "opacity-60"}`}>
           <p className="text-xs font-bold" style={{ color: me.accent_color }}>{me.display_name}</p>
           <p className="mt-1 text-2xl font-black">{myCount}<span className="text-sm">번</span></p>
           {myLosing && <p className="text-xs text-[#A93F62]">😅 지고 있어요</p>}
         </div>
-        <div className="text-sm text-[#C8B5E8]">vs</div>
-        {other && (
-          <div className={`text-center ${otherLosing ? "opacity-100" : "opacity-60"}`}>
-            <p className="text-xs font-bold" style={{ color: other.accent_color }}>{other.display_name}</p>
-            <p className="mt-1 text-2xl font-black">{otherCount}<span className="text-sm">번</span></p>
-            {otherLosing && <p className="text-xs text-[#A93F62]">😅 지고 있어요</p>}
-          </div>
-        )}
+        {otherCounts.map(({ profile, count }) => {
+          const losing = count === maxCount;
+          return (
+            <div key={profile.id} className={`text-center ${losing ? "opacity-100" : "opacity-60"}`}>
+              <p className="text-xs font-bold" style={{ color: profile.accent_color }}>{profile.display_name}</p>
+              <p className="mt-1 text-2xl font-black">{count}<span className="text-sm">번</span></p>
+              {losing && <p className="text-xs text-[#A93F62]">😅 지고 있어요</p>}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function GiftSetupCard({ state, me, other, action }: { state: AppState; me: Profile; other: Profile | null; action: (fn: () => Promise<unknown>) => Promise<void> }) {
+function GiftSetupCard({ state, me, action }: { state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void> }) {
   const [giftText, setGiftText] = useState("");
   const [editing, setEditing] = useState(false);
 
@@ -591,11 +784,11 @@ function GiftSetupCard({ state, me, other, action }: { state: AppState; me: Prof
           <div>
             <p className="text-xs font-bold text-[#8B7088]">내가 설정한 선물 🎁</p>
             <p className="mt-1 text-sm font-bold">{myGift.gift_description}</p>
-            <p className="mt-1 text-xs text-[#A89AA0]">{other?.display_name}은(는) 못 봐요</p>
+            <p className="mt-1 text-xs text-[#A89AA0]">다른 멤버들은 못 봐요</p>
           </div>
           <button onClick={() => { setGiftText(myGift.gift_description); setEditing(true); }} className="text-xs text-[#8B7088] underline">수정</button>
         </div>
-        {partnerHasGift && <p className="mt-3 text-xs text-[#A93F62]">상대방도 선물을 설정했어요 🤫</p>}
+        {partnerHasGift && <p className="mt-3 text-xs text-[#A93F62]">누군가 이미 선물을 설정했어요 🤫</p>}
       </div>
     );
   }
@@ -604,8 +797,8 @@ function GiftSetupCard({ state, me, other, action }: { state: AppState; me: Prof
     return (
       <div className="card rounded-3xl p-4">
         <p className="text-sm font-black">선물 설정 🎁</p>
-        <p className="mt-1 text-xs text-[#8B7088]">이번 책에서 지면 줄 선물을 몰래 정해봐요. {other?.display_name}은(는) 책이 끝날 때까지 못 봐요.</p>
-        {partnerHasGift && <p className="mt-2 text-xs text-[#A93F62]">상대방이 이미 선물을 설정했어요 🤫</p>}
+        <p className="mt-1 text-xs text-[#8B7088]">이번 책에서 지면 줄 선물을 몰래 정해봐요. 다른 멤버들은 책이 끝날 때까지 못 봐요.</p>
+        {partnerHasGift && <p className="mt-2 text-xs text-[#A93F62]">누군가 이미 선물을 설정했어요 🤫</p>}
         <button onClick={() => setEditing(true)} className="mt-3 rounded-xl px-4 py-2 text-sm font-bold text-white" style={{ background: me.accent_color }}>
           선물 정하기
         </button>
@@ -671,7 +864,7 @@ function RevealedGiftsCard({ state }: { state: AppState }) {
 function TodayView({
   state,
   me,
-  other,
+  others,
   segment,
   book,
   onRead,
@@ -681,19 +874,30 @@ function TodayView({
 }: {
   state: AppState;
   me: Profile;
-  other: Profile | null;
+  others: Profile[];
   segment: Segment;
   book: Book | null;
-  onRead: () => void;
+  onRead: (segmentIds: string[]) => void;
   onOpenSegment: (id: string) => void;
   action: (fn: () => Promise<unknown>) => Promise<void>;
   proposalAction: (fn: () => Promise<unknown>) => Promise<void>;
 }) {
-  const myRead = state.readingStates.some((item) => item.segment_id === segment.id && item.profile_id === me.id);
-  const otherRead = other ? state.readingStates.some((item) => item.segment_id === segment.id && item.profile_id === other.id) : false;
-  const bothRead = myRead && otherRead;
-  const comments = state.comments.filter((item) => item.segment_id === segment.id);
-  const highlights = state.highlights.filter((item) => item.segment_id === segment.id);
+  const isPlanMode = state.readingMode === "plan" && Boolean(state.planDay);
+  const todaySegments = isPlanMode
+    ? (state.planDay?.segment_ids
+        .map((id) => state.segments.find((item) => item.id === id))
+        .filter((item): item is Segment => Boolean(item)) ?? [])
+    : [segment];
+  const todaySegmentIds = todaySegments.map((item) => item.id);
+
+  const myRead = todaySegmentIds.every((id) => state.readingStates.some((item) => item.segment_id === id && item.profile_id === me.id));
+  const othersRead = others.map((profile) => ({
+    profile,
+    done: todaySegmentIds.every((id) => state.readingStates.some((item) => item.segment_id === id && item.profile_id === profile.id)),
+  }));
+  const allRead = myRead && othersRead.every((item) => item.done);
+  const comments = state.comments.filter((item) => todaySegmentIds.includes(item.segment_id));
+  const highlights = state.highlights.filter((item) => todaySegmentIds.includes(item.segment_id));
   const missedProfiles = state.manualAdvance.missedProfileIds
     .map((profileId) => state.profiles.find((profile) => profile.id === profileId)?.display_name)
     .filter((name): name is string => Boolean(name));
@@ -706,18 +910,24 @@ function TodayView({
       <div className="card rounded-3xl p-6">
         <p className="text-sm text-[#8B7088]">오늘은</p>
         <h2 className="mt-2 text-4xl font-black">
-          <span style={{ color: me.accent_color }}>{segment.book_name}</span> {segment.chapter}장
+          {isPlanMode ? (
+            <span style={{ color: me.accent_color }}>{formatPlanRange(todaySegments)}</span>
+          ) : (
+            <>
+              <span style={{ color: me.accent_color }}>{segment.book_name}</span> {segment.chapter}장
+            </>
+          )}
         </h2>
         <p className="mt-2 text-sm text-[#8B7088]">
           {showManualAdvance
             ? `${missedProfiles.join(", ")}님이 전날 못 읽어서 멈춰 있어요.`
-            : bothRead
-              ? "오늘은 둘 다 읽었어요. 새벽 2시에 다음 범위가 열려요."
+            : allRead
+              ? "오늘은 모두 읽었어요. 새벽 2시에 다음 범위가 열려요."
               : "여유 있을 때 천천히, 함께."}
         </p>
         <div className={`mt-6 grid gap-3 ${showManualAdvance ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
           <a
-            href={segment.jw_url ?? undefined}
+            href={todaySegments[0]?.jw_url ?? undefined}
             target="_blank"
             rel="noreferrer"
             className="rounded-2xl px-4 py-4 text-center text-sm font-bold text-white"
@@ -727,7 +937,7 @@ function TodayView({
           </a>
           <button
             disabled={myRead}
-            onClick={onRead}
+            onClick={() => onRead(todaySegmentIds)}
             className="rounded-2xl border border-dashed px-4 py-4 text-sm font-bold disabled:cursor-default disabled:opacity-60"
             style={{ borderColor: me.accent_soft, color: me.accent_color }}
           >
@@ -747,13 +957,15 @@ function TodayView({
         </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className={`grid gap-3 ${others.length > 1 ? "sm:grid-cols-2 md:grid-cols-3" : "sm:grid-cols-2"}`}>
         <ReadChip profile={me} done={myRead} />
-        {other && <ReadChip profile={other} done={otherRead} />}
+        {othersRead.map(({ profile, done }) => (
+          <ReadChip key={profile.id} profile={profile} done={done} />
+        ))}
       </div>
 
-      <MissScoreboard state={state} me={me} other={other} />
-      <GiftSetupCard state={state} me={me} other={other} action={action} />
+      <MissScoreboard state={state} me={me} others={others} />
+      <GiftSetupCard state={state} me={me} action={action} />
 
       <div className="card rounded-3xl p-5">
         <div className="mb-4 flex items-center justify-between">
@@ -768,8 +980,10 @@ function TodayView({
         </div>
       </div>
 
-      {state.progress?.status === "choosing_book" && <ProposalCard state={state} me={me} action={proposalAction} />}
-      {book && <p className="text-center text-xs text-[#A89AA0]">지금 함께 읽는 책: {book.name}</p>}
+      {!isPlanMode && state.progress?.status === "choosing_book" && <ProposalCard state={state} me={me} action={proposalAction} />}
+      {isPlanMode
+        ? <p className="text-center text-xs text-[#A89AA0]">지금 함께 읽는 책: {todaySegments[todaySegments.length - 1]?.book_name ?? ""}</p>
+        : book && <p className="text-center text-xs text-[#A89AA0]">지금 함께 읽는 책: {book.name}</p>}
     </div>
   );
 }
@@ -811,7 +1025,7 @@ function ReadingView({
             </button>
           ))}
         </div>
-        <ProposalCard state={state} me={me} action={proposalAction} compact />
+        {state.readingMode !== "plan" && <ProposalCard state={state} me={me} action={proposalAction} compact />}
       </div>
 
       <div className="space-y-5">
@@ -1179,153 +1393,6 @@ function EntryCard({
   );
 }
 
-function ChatView({
-  state,
-  me,
-  action,
-  onSendMessage,
-  onlineProfileIds = [],
-  compact,
-}: {
-  state: AppState;
-  me: Profile;
-  action?: (fn: () => Promise<unknown>) => Promise<void>;
-  onSendMessage?: (body: string) => Promise<boolean>;
-  onlineProfileIds?: string[];
-  compact?: boolean;
-}) {
-  const [message, setMessage] = useState("");
-  const [pendingMessages, setPendingMessages] = useState<Message[]>([]);
-  const messagesRef = useRef<HTMLDivElement | null>(null);
-  const composingRef = useRef(false);
-  const visibleMessages = useMemo(() => [...state.messages.filter((item) => !item.deleted_at), ...pendingMessages], [pendingMessages, state.messages]);
-  const latestMessageId = visibleMessages[visibleMessages.length - 1]?.id;
-
-  function scrollMessagesToLatest() {
-    const messagesEl = messagesRef.current;
-    if (!messagesEl) return;
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  }
-
-  async function sendCurrentMessage() {
-    if (!onSendMessage || composingRef.current) return;
-    const body = message.trim();
-    if (!body) return;
-
-    const optimisticMessage: Message = {
-      id: `pending-${Date.now()}`,
-      sender_id: me.id,
-      body,
-      created_at: new Date().toISOString(),
-      edited_at: null,
-      deleted_at: null,
-    };
-
-    flushSync(() => {
-      setMessage("");
-      setPendingMessages((prev) => [...prev, optimisticMessage]);
-    });
-    scrollMessagesToLatest();
-    window.requestAnimationFrame(scrollMessagesToLatest);
-
-    const sent = await onSendMessage(body);
-    setPendingMessages((prev) => prev.filter((item) => item.id !== optimisticMessage.id));
-    if (!sent) {
-      setMessage((current) => current || body);
-    }
-  }
-
-  useLayoutEffect(() => {
-    scrollMessagesToLatest();
-    const frame = window.requestAnimationFrame(scrollMessagesToLatest);
-    return () => window.cancelAnimationFrame(frame);
-  }, [latestMessageId, visibleMessages.length, compact]);
-
-  const other = state.profiles.find((profile) => profile.id !== me.id);
-  const otherOnline = other ? onlineProfileIds.includes(other.id) : false;
-  const readByOther = new Set(
-    state.messageReads
-      .filter((item) => item.profile_id !== me.id)
-      .map((item) => item.message_id),
-  );
-  return (
-    <div className={`card flex ${compact ? "h-[calc(100vh-120px)]" : "h-[calc(100vh-190px)] min-h-[520px]"} min-h-0 flex-col rounded-3xl`}>
-      <div className="border-b border-[#F2DCE5] p-4">
-        <h2 className="text-lg font-black">둘만의 대화</h2>
-        <p className="text-xs text-[#8B7088]">
-          {otherOnline ? `${other?.display_name ?? "상대"}와 함께 있는 중` : "답장은 천천히 와도 괜찮아요."}
-        </p>
-      </div>
-      <div ref={messagesRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-4">
-        {visibleMessages.map((item) => {
-          const mine = item.sender_id === me.id;
-          const author = state.profiles.find((profile) => profile.id === item.sender_id);
-          const pending = item.id.startsWith("pending-");
-          return (
-            <div key={item.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
-              <div className={`max-w-[82%] rounded-2xl px-4 py-3 text-sm ${mine ? "text-white" : "bg-white"}`} style={mine ? { background: me.accent_color } : { border: `1px solid ${author?.accent_soft ?? "#F2DCE5"}` }}>
-                {!mine && <div className="mb-1 text-xs font-bold" style={{ color: author?.accent_color }}>{author?.display_name}</div>}
-                <p className="whitespace-pre-wrap">{item.body}</p>
-                <div className={`mt-1 flex items-center justify-between gap-3 text-[11px] ${mine ? "text-white/75" : "text-[#A89AA0]"}`}>
-                  <span>{shortDate(item.created_at)} {!pending && item.edited_at ? "· 수정됨" : ""}</span>
-                  {mine && !pending && readByOther.has(item.id) && <span>읽음</span>}
-                  {mine && !pending && action && <MessageTools item={item} action={action} />}
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          void sendCurrentMessage();
-        }}
-        className="flex gap-2 border-t border-[#F2DCE5] p-3"
-      >
-        <input
-          value={message}
-          onChange={(event) => setMessage(event.target.value)}
-          onCompositionStart={() => {
-            composingRef.current = true;
-          }}
-          onCompositionEnd={() => {
-            composingRef.current = false;
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && event.nativeEvent.isComposing) {
-              event.preventDefault();
-            }
-          }}
-          placeholder="메시지"
-          className="min-w-0 flex-1 rounded-2xl border border-[#F2DCE5] px-4 py-3"
-        />
-        <button
-          disabled={!message.trim() || !onSendMessage}
-          className={`rounded-2xl px-4 transition ${message.trim() && onSendMessage ? "text-white" : "bg-white text-[#C8B5BF]"} disabled:cursor-default`}
-          style={message.trim() && onSendMessage ? { background: me.accent_color } : undefined}
-          aria-label="보내기"
-        >
-          <Send size={18} />
-        </button>
-      </form>
-    </div>
-  );
-}
-
-function MessageTools({ item, action }: { item: Message; action: (fn: () => Promise<unknown>) => Promise<void> }) {
-  return (
-    <span className="ml-2 inline-flex gap-2">
-      <button type="button" onClick={() => editText(item.body, (body) => action(() => apiAction("update_message", { id: item.id, body })))} className="underline">
-        수정
-      </button>
-      <button type="button" onClick={() => confirmDelete(() => action(() => apiAction("delete_message", { id: item.id })))} className="underline">
-        삭제
-      </button>
-    </span>
-  );
-}
-
 function RecordsView({
   state,
   selectedBookId,
@@ -1580,7 +1647,7 @@ function ProposalCard({ state, me, action, compact }: { state: AppState; me: Pro
           <p className="mt-1 text-[#8B7088]">{activePending.note || "같이 읽어볼까요?"}</p>
           {proposedByMe ? (
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <p className="text-xs text-[#A89AA0]">상대의 수락을 기다리는 중이에요.</p>
+              <p className="text-xs text-[#A89AA0]">다른 멤버의 수락을 기다리는 중이에요.</p>
               <button onClick={openProposalForm} className="inline-flex items-center gap-1 rounded-xl bg-white px-3 py-2 text-xs font-bold text-[#8B7088]">
                 <RefreshCw size={13} />
                 다른 책 제안
@@ -1685,6 +1752,69 @@ function ReadChip({ profile, done }: { profile: Profile; done: boolean }) {
         <p className="text-xs text-[#8B7088]">{done ? "읽었어요" : "천천히 읽는 중"}</p>
       </div>
     </div>
+  );
+}
+
+function BackButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button onClick={onClick} className="inline-flex items-center gap-1 text-sm font-bold text-[#8B7088]">
+      <ChevronLeft size={16} /> 뒤로
+    </button>
+  );
+}
+
+function ColorPicker({
+  value,
+  onChange,
+  usedColorKeys = [],
+}: {
+  value: string;
+  onChange: (colorKey: string) => void;
+  usedColorKeys?: string[];
+}) {
+  return (
+    <div>
+      <label className="text-xs font-bold text-[#8B7088]">내 색상</label>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {MEMBER_COLOR_PALETTE.map((color) => {
+          const used = usedColorKeys.includes(color.colorKey) && color.colorKey !== value;
+          return (
+            <button
+              key={color.colorKey}
+              type="button"
+              disabled={used}
+              onClick={() => onChange(color.colorKey)}
+              className={`h-9 w-9 rounded-full border-2 disabled:cursor-not-allowed disabled:opacity-30 ${value === color.colorKey ? "border-[#3A2E3A]" : "border-white"}`}
+              style={{ background: color.accentColor }}
+              aria-label={color.colorKey}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ReadingModeOption({
+  active,
+  title,
+  description,
+  onClick,
+}: {
+  active: boolean;
+  title: string;
+  description: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-xl border px-3 py-3 text-left text-sm ${active ? "border-[#A93F62] bg-[#FCE4EC]" : "border-[#F2DCE5] bg-white"}`}
+    >
+      <span className="block font-bold">{title}</span>
+      <span className="text-xs text-[#8B7088]">{description}</span>
+    </button>
   );
 }
 
