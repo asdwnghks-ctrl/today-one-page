@@ -99,6 +99,15 @@ Remote project `ggezuvdhuaizerfmkevl` has been updated with these app migrations
 - `202605020001_initial_mvp.sql`
 - `202605100001_misses_and_gifts.sql`
 - `202605140001_session_misses_and_deferred_books.sql`
+- `202607040001_multi_group_schema.sql` (groups/plan_days tables, group_id/pin_hash/plan_day_index columns)
+- `202607040002_multi_group_backfill.sql` (existing 주환/희진 data moved into the first group, invite code `TGBHER`)
+- `202607040003_profiles_pin_hash_notnull.sql` (applied after `scripts/migrate-pins.ts` backfilled every profile's `pin_hash`)
+
+Applied via the Supabase Management API (`POST /v1/projects/{ref}/database/query`) with a personal access token, since `supabase db push` needs the DB password which isn't stored anywhere in this repo. If a fresh migration needs applying again and the CLI path isn't available, that endpoint works as a fallback.
+
+### Known gotcha: 1000-row response cap
+
+The hosted project's PostgREST caps every response at 1000 rows regardless of the `Range` header a client sends. `segments` has 1189 rows, so any unranged `select("*")` on it silently drops rows past the 1000th (this bit the reading-plan seeding script and `app/api/state/route.ts`). Any future query expected to return more than 1000 rows must page through with repeated `.range()` calls rather than assuming one request returns everything.
 
 The latest migration is important because it adds `reading_misses.session_id` and marks already-applied old immediate book proposals as `started`. If the app reports `column reading_misses.session_id does not exist`, the remote DB is missing that migration or is pointed at the wrong project.
 
