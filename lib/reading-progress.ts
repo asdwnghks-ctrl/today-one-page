@@ -96,7 +96,7 @@ async function revealGiftsForSession(sessionId: string, profileIds: string[]) {
   if (error) throw error;
 }
 
-async function getFirstSegment(bookId: string) {
+export async function getFirstSegmentOfBook(bookId: string) {
   const { data: firstSegment, error } = await supabaseAdmin
     .from("segments")
     .select("*")
@@ -112,7 +112,7 @@ export async function startAcceptedProposal(
   proposal: AcceptedProposal,
   now = new Date().toISOString(),
 ) {
-  const firstSegment = await getFirstSegment(proposal.proposed_book_id);
+  const firstSegment = await getFirstSegmentOfBook(proposal.proposed_book_id);
   const { error: progressError } = await supabaseAdmin
     .from("reading_progress")
     .update({
@@ -147,6 +147,63 @@ async function getAcceptedProposal(groupId: string) {
     .maybeSingle();
   if (error) throw error;
   return data as AcceptedProposal | null;
+}
+
+async function getReadBookIds(groupId: string, profileIds: string[]): Promise<Set<string>> {
+  const bookIds = new Set<string>();
+
+  const { data: progress, error: progressError } = await supabaseAdmin
+    .from("reading_progress")
+    .select("initial_book_id,current_book_id")
+    .eq("group_id", groupId)
+    .maybeSingle();
+  if (progressError) throw progressError;
+  if (progress?.initial_book_id) bookIds.add(progress.initial_book_id);
+  if (progress?.current_book_id) bookIds.add(progress.current_book_id);
+
+  const { data: states, error: statesError } = await supabaseAdmin
+    .from("reading_states")
+    .select("segment_id")
+    .in("profile_id", profileIds)
+    .not("checked_at", "is", null);
+  if (statesError) throw statesError;
+  const segmentIds = Array.from(new Set((states ?? []).map((s) => s.segment_id)));
+  if (segmentIds.length) {
+    const { data: segments, error: segmentsError } = await supabaseAdmin.from("segments").select("book_id").in("id", segmentIds);
+    if (segmentsError) throw segmentsError;
+    for (const segment of segments ?? []) bookIds.add(segment.book_id);
+  }
+
+  const { data: started, error: startedError } = await supabaseAdmin
+    .from("book_proposals")
+    .select("proposed_book_id")
+    .eq("group_id", groupId)
+    .eq("status", "started");
+  if (startedError) throw startedError;
+  for (const row of started ?? []) bookIds.add(row.proposed_book_id);
+
+  return bookIds;
+}
+
+export type NextBookResolution = { source: "owner" | "auto"; bookId: string; proposalId?: string };
+
+export async function resolveNextBook(groupId: string, excludeBookId: string | null): Promise<NextBookResolution> {
+  const accepted = await getAcceptedProposal(groupId);
+  if (accepted) return { source: "owner", bookId: accepted.proposed_book_id, proposalId: accepted.id };
+
+  const { data: profiles, error: profileError } = await supabaseAdmin.from("profiles").select("id").eq("group_id", groupId);
+  if (profileError) throw profileError;
+  const profileIds = (profiles ?? []).map((p) => p.id);
+
+  const readBookIds = await getReadBookIds(groupId, profileIds);
+  if (excludeBookId) readBookIds.add(excludeBookId);
+
+  const { data: books, error: booksError } = await supabaseAdmin.from("books").select("id").order("sort_order");
+  if (booksError) throw booksError;
+  if (!books?.length) throw new Error("책 정보를 찾지 못했어요");
+
+  const unread = books.find((book) => !readBookIds.has(book.id));
+  return { source: "auto", bookId: unread?.id ?? books[0].id };
 }
 
 async function advanceProgress(progress: ProgressForAdvance, segmentId: string, groupId: string): Promise<AdvanceResult> {
@@ -186,22 +243,27 @@ async function advanceProgress(progress: ProgressForAdvance, segmentId: string, 
   const profileIds = (profiles ?? []).map((p) => p.id);
   await revealGiftsForSession(progress.session_id, profileIds);
 
-  const acceptedProposal = await getAcceptedProposal(groupId);
-  if (acceptedProposal) {
-    const firstSegment = await startAcceptedProposal(progress, acceptedProposal, now);
+  const next = await resolveNextBook(groupId, currentSegment.book_id);
+  if (next.source === "owner" && next.proposalId) {
+    const firstSegment = await startAcceptedProposal(progress, { id: next.proposalId, proposed_book_id: next.bookId }, now);
     return { segmentId: firstSegment.id };
   }
 
+  const firstSegment = await getFirstSegmentOfBook(next.bookId);
   const { error } = await supabaseAdmin
     .from("reading_progress")
     .update({
-      status: "choosing_book",
-      completed_at: now,
+      current_book_id: next.bookId,
+      current_segment_id: firstSegment.id,
+      status: "reading",
+      started_at: now,
+      completed_at: null,
       updated_at: now,
+      session_id: crypto.randomUUID(),
     })
     .eq("id", progress.id);
   if (error) throw error;
-  return { segmentId: null };
+  return { segmentId: firstSegment.id };
 }
 
 async function advancePlanProgress(progress: ProgressForAdvance, groupId: string): Promise<AdvanceResult> {

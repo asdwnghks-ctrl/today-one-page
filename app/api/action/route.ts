@@ -214,62 +214,43 @@ export async function POST(request: NextRequest) {
         break;
       }
 
-      case "propose_book": {
+      case "set_next_book": {
         const bookId = asString(payload.bookId);
-        const note = asString(payload.note);
         if (!bookId) throw new Error("책을 골라 주세요");
+
+        const { data: group, error: groupError } = await supabaseAdmin
+          .from("groups")
+          .select("owner_id,reading_mode")
+          .eq("id", actor.group_id)
+          .single();
+        if (groupError) throw groupError;
+        if (group.owner_id !== actor.id) throw new Error("방장만 다음 책을 정할 수 있어요");
+        if (group.reading_mode !== "daily_one") throw new Error("하루 1장 모드에서만 다음 책을 정할 수 있어요");
+
+        const { data: book, error: bookError } = await supabaseAdmin.from("books").select("id,name").eq("id", bookId).maybeSingle();
+        if (bookError) throw bookError;
+        if (!book) throw new Error("책을 다시 확인해 주세요");
+
         const { error: cancelError } = await supabaseAdmin
           .from("book_proposals")
           .update({ status: "cancelled", cancelled_at: now })
           .eq("group_id", actor.group_id)
-          .in("status", ["pending", "accepted"]);
+          .eq("status", "accepted");
         if (cancelError) throw cancelError;
-        const { data, error } = await supabaseAdmin
+        const { data: created, error: insertError } = await supabaseAdmin
           .from("book_proposals")
-          .insert({ group_id: actor.group_id, proposed_book_id: bookId, proposed_by: actor.id, note: note || null, status: "pending" })
+          .insert({ group_id: actor.group_id, proposed_book_id: bookId, proposed_by: actor.id, accepted_by: actor.id, status: "accepted", accepted_at: now })
           .select("id")
           .single();
-        if (error) throw error;
-        await notifyOthers(actor, "book_proposal", `${actor.display_name}이 다음 책을 제안했어요`, "함께 읽을 다음 책을 확인해 주세요.", "book_proposal", data.id);
-        return NextResponse.json({ ok: true, id: data.id });
-      }
+        if (insertError) throw insertError;
 
-      case "accept_proposal": {
-        const proposalId = asString(payload.id);
-        const { data: proposal, error: proposalError } = await supabaseAdmin.from("book_proposals").select("*").eq("id", proposalId).single();
-        if (proposalError) throw proposalError;
-        if (proposal.group_id !== actor.group_id) throw new Error("잘못된 제안이에요");
-        if (proposal.status !== "pending") throw new Error("이미 처리된 제안이에요");
-        if (proposal.proposed_by === actor.id) throw new Error("상대가 수락해야 해요");
-        const { error: segmentError } = await supabaseAdmin
-          .from("segments")
-          .select("id")
-          .eq("book_id", proposal.proposed_book_id)
-          .eq("chapter", 1)
-          .single();
-        if (segmentError) throw segmentError;
         const progress = await getCurrentProgress(actor.group_id);
-        const { data: acceptedProposal, error: acceptedProposalError } = await supabaseAdmin
-          .from("book_proposals")
-          .select("id")
-          .eq("group_id", actor.group_id)
-          .eq("status", "accepted")
-          .neq("id", proposalId)
-          .limit(1)
-          .maybeSingle();
-        if (acceptedProposalError) throw acceptedProposalError;
-        if (acceptedProposal) throw new Error("이미 다음 책이 정해져 있어요");
-        const { error: updateProposalError } = await supabaseAdmin
-          .from("book_proposals")
-          .update({ status: "accepted", accepted_by: actor.id, accepted_at: now })
-          .eq("id", proposalId);
-        if (updateProposalError) throw updateProposalError;
         if (progress.status === "choosing_book") {
-          const firstSegment = await startAcceptedProposal(progress, { id: proposal.id, proposed_book_id: proposal.proposed_book_id }, now);
-          await notifyOthers(actor, "book_accepted", `${actor.display_name}이 다음 책을 수락했어요`, "새 책의 1장이 열렸어요.", "segment", firstSegment.id);
+          const firstSegment = await startAcceptedProposal(progress, { id: created.id, proposed_book_id: bookId }, now);
+          await notifyOthers(actor, "book_accepted", `${actor.display_name}이 다음 책을 ${book.name}(으)로 정했어요`, "1장이 열렸어요.", "segment", firstSegment.id);
           break;
         }
-        await notifyOthers(actor, "book_accepted", `${actor.display_name}이 다음 책을 수락했어요`, "지금 읽는 책이 끝난 다음 날 1장이 열려요.", "book_proposal", proposal.id);
+        await notifyOthers(actor, "book_accepted", `${actor.display_name}이 다음 책을 ${book.name}(으)로 정했어요`, "지금 읽는 책이 끝나면 이어져요.", "book_proposal", created.id);
         break;
       }
 
@@ -278,7 +259,7 @@ export async function POST(request: NextRequest) {
         if (result.segmentId) {
           await notifyOthers(actor, "reading_advanced", `${actor.display_name}이 다음 범위를 열었어요`, "다음 읽기 범위가 열렸어요.", "segment", result.segmentId);
         } else {
-          await notifyOthers(actor, "reading_advanced", `${actor.display_name}이 책을 마쳤어요`, "다음 책을 고를 차례예요.", "book_proposal");
+          await notifyOthers(actor, "reading_advanced", `${actor.display_name}이 성경을 완독했어요`, "축하해요! 계획표를 다 읽었어요.", "book_proposal");
         }
         break;
       }
