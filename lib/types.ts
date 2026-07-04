@@ -169,11 +169,20 @@ export type ManualAdvanceState = {
   missedProfileIds: string[];
 };
 
+export type NextBook = {
+  bookId: string;
+  isOwnerPick: boolean;
+};
+
 export type AppState = {
   me: Profile | null;
   profiles: Profile[];
+  groupName: string;
+  inviteCode: string;
+  isOwner: boolean;
   readingMode: "daily_one" | "plan";
   planDay: PlanDay | null;
+  nextBook: NextBook | null;
   sections: Section[];
   books: Book[];
   segments: Segment[];

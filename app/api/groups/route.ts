@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { colorForKey, isValidColorKey } from "@/lib/color-palette";
 import { generateInviteCode, isUniqueViolation } from "@/lib/invite-code";
 import { hashPin } from "@/lib/pin";
+import { getFirstSegmentOfBook } from "@/lib/reading-progress";
 import { setSessionCookies } from "@/lib/session";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
@@ -17,11 +18,31 @@ export async function POST(request: NextRequest) {
     const colorKey = asString(body.colorKey);
     const pin = asString(body.pin);
     const readingMode = body.readingMode === "plan" ? "plan" : "daily_one";
+    const startBookId = asString(body.startBookId);
+    const startDayIndex = Number(body.startDayIndex);
 
     if (!groupName || groupName.length > 40) throw new Error("그룹 이름을 확인해 주세요");
     if (!yourName || yourName.length > 20) throw new Error("이름을 확인해 주세요");
     if (pin.length < 4 || pin.length > 8) throw new Error("비밀번호는 4~8자로 입력해 주세요");
     if (!isValidColorKey(colorKey)) throw new Error("색상을 선택해 주세요");
+
+    let planStartDay: { book_id: string; segment_ids: string[] } | null = null;
+    if (readingMode === "plan") {
+      if (!Number.isFinite(startDayIndex)) throw new Error("시작 위치를 다시 확인해 주세요");
+      const { data, error } = await supabaseAdmin
+        .from("plan_days")
+        .select("book_id,segment_ids")
+        .eq("day_index", startDayIndex)
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) throw new Error("시작 위치를 다시 확인해 주세요");
+      planStartDay = data;
+    } else {
+      if (!startBookId) throw new Error("시작할 책을 선택해 주세요");
+      const { data, error } = await supabaseAdmin.from("books").select("id").eq("id", startBookId).maybeSingle();
+      if (error) throw error;
+      if (!data) throw new Error("시작할 책을 선택해 주세요");
+    }
 
     let groupId: string | null = null;
     let inviteCode = "";
@@ -64,30 +85,24 @@ export async function POST(request: NextRequest) {
     const { error: ownerError } = await supabaseAdmin.from("groups").update({ owner_id: profile.id }).eq("id", groupId);
     if (ownerError) throw ownerError;
 
-    if (readingMode === "plan") {
-      const { data: firstDay, error: firstDayError } = await supabaseAdmin
-        .from("plan_days")
-        .select("book_id,segment_ids")
-        .eq("day_index", 1)
-        .single();
-      if (firstDayError) throw firstDayError;
-
+    if (readingMode === "plan" && planStartDay) {
       const { error: progressError } = await supabaseAdmin.from("reading_progress").insert({
         group_id: groupId,
-        current_book_id: firstDay.book_id,
-        current_segment_id: firstDay.segment_ids[0],
-        initial_book_id: firstDay.book_id,
+        current_book_id: planStartDay.book_id,
+        current_segment_id: planStartDay.segment_ids[0],
+        initial_book_id: planStartDay.book_id,
         status: "reading",
-        plan_day_index: 1,
+        plan_day_index: startDayIndex,
       });
       if (progressError) throw progressError;
     } else {
+      const firstSegment = await getFirstSegmentOfBook(startBookId);
       const { error: progressError } = await supabaseAdmin.from("reading_progress").insert({
         group_id: groupId,
-        current_book_id: null,
-        current_segment_id: null,
-        initial_book_id: null,
-        status: "choosing_book",
+        current_book_id: startBookId,
+        current_segment_id: firstSegment.id,
+        initial_book_id: startBookId,
+        status: "reading",
       });
       if (progressError) throw progressError;
     }

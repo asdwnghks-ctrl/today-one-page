@@ -15,6 +15,7 @@ import {
   Sparkles,
   SkipForward,
   Trash2,
+  Users,
   X,
 } from "lucide-react";
 import type {
@@ -28,6 +29,7 @@ import type {
   SegmentComment,
 } from "@/lib/types";
 import { MEMBER_COLOR_PALETTE } from "@/lib/color-palette";
+import { READING_PLAN_SECTIONS } from "@/lib/reading-plan-sections";
 import { supabaseBrowser } from "@/lib/supabase-browser";
 
 type Tab = "today" | "reading" | "records";
@@ -112,6 +114,21 @@ export default function Page() {
   const [colorKeyInput, setColorKeyInput] = useState(MEMBER_COLOR_PALETTE[0].colorKey);
   const [readingModeInput, setReadingModeInput] = useState<"daily_one" | "plan">("daily_one");
   const [createdInviteCode, setCreatedInviteCode] = useState<string | null>(null);
+  const [publicBooks, setPublicBooks] = useState<{ id: string; name: string }[]>([]);
+  const [startBookIdInput, setStartBookIdInput] = useState("");
+  const [startDayIndexInput, setStartDayIndexInput] = useState(READING_PLAN_SECTIONS[0].startDay);
+  const [groupInfoOpen, setGroupInfoOpen] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/books")
+      .then((response) => response.json())
+      .then((json) => setPublicBooks(json.books ?? []))
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!startBookIdInput && publicBooks.length) setStartBookIdInput(publicBooks[0].id);
+  }, [publicBooks, startBookIdInput]);
 
   const fetchState = useCallback(async () => {
     const response = await fetch("/api/state", { cache: "no-store" });
@@ -275,6 +292,8 @@ export default function Page() {
           colorKey: colorKeyInput,
           pin,
           readingMode: readingModeInput,
+          startBookId: readingModeInput === "daily_one" ? startBookIdInput : undefined,
+          startDayIndex: readingModeInput === "plan" ? startDayIndexInput : undefined,
         }),
       });
       const json = await response.json();
@@ -284,7 +303,6 @@ export default function Page() {
       }
       setPin("");
       setCreatedInviteCode(json.inviteCode);
-      await fetchState();
     } finally {
       setAuthPending(false);
     }
@@ -472,7 +490,7 @@ export default function Page() {
                 <input
                   value={groupNameInput}
                   onChange={(event) => setGroupNameInput(event.target.value)}
-                  placeholder="예: 주환♥희진"
+                  placeholder="예: 주니네 가족"
                   className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
                 />
               </div>
@@ -502,6 +520,33 @@ export default function Page() {
                   />
                 </div>
               </div>
+              {readingModeInput === "daily_one" ? (
+                <div>
+                  <label className="text-xs font-bold text-[#8B7088]">시작할 책</label>
+                  <select
+                    value={startBookIdInput}
+                    onChange={(event) => setStartBookIdInput(event.target.value)}
+                    className="mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-3 py-3 text-sm"
+                  >
+                    {publicBooks.map((book) => (
+                      <option key={book.id} value={book.id}>{book.name}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <label className="text-xs font-bold text-[#8B7088]">시작할 범위</label>
+                  <select
+                    value={startDayIndexInput}
+                    onChange={(event) => setStartDayIndexInput(Number(event.target.value))}
+                    className="mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-3 py-3 text-sm"
+                  >
+                    {READING_PLAN_SECTIONS.map((section) => (
+                      <option key={section.startDay} value={section.startDay}>{section.label}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div>
                 <label className="text-xs font-bold text-[#8B7088]">내 비밀번호 (4~8자)</label>
                 <input
@@ -513,7 +558,13 @@ export default function Page() {
                 />
               </div>
               <button
-                disabled={authPending || !groupNameInput.trim() || !yourNameInput.trim() || pin.length < 4}
+                disabled={
+                  authPending ||
+                  !groupNameInput.trim() ||
+                  !yourNameInput.trim() ||
+                  pin.length < 4 ||
+                  (readingModeInput === "daily_one" && !startBookIdInput)
+                }
                 onClick={() => void createGroup()}
                 className="w-full rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-60"
                 style={{ background: "#A93F62" }}
@@ -644,6 +695,9 @@ export default function Page() {
           <h1 className="mt-1 text-2xl font-black">오늘도 한 페이지</h1>
         </div>
         <div className="flex items-center gap-2">
+          <IconButton label="그룹 정보" onClick={() => setGroupInfoOpen(true)}>
+            <Users size={18} />
+          </IconButton>
           <IconButton label="알림" onClick={() => setNotificationsOpen(true)}>
             <Bell size={18} />
             {unreadCount > 0 && <Badge>{unreadCount}</Badge>}
@@ -704,7 +758,7 @@ export default function Page() {
         </section>
 
         <aside className="hidden lg:block">
-          {appState.readingMode !== "plan" && <ProposalCard state={appState} me={me} action={refreshAfter} />}
+          {appState.readingMode !== "plan" && <NextBookCard state={appState} me={me} action={refreshAfter} />}
         </aside>
       </div>
 
@@ -729,6 +783,12 @@ export default function Page() {
               setNotificationsOpen(false);
             }}
           />
+        </Drawer>
+      )}
+
+      {groupInfoOpen && (
+        <Drawer title="그룹 정보" onClose={() => setGroupInfoOpen(false)}>
+          <GroupInfoView state={appState} />
         </Drawer>
       )}
       <div className="fixed bottom-[78px] right-4 z-20 rounded-full bg-white/80 px-3 py-1 text-[11px] text-[#8B7088] shadow-sm">
@@ -980,7 +1040,11 @@ function TodayView({
         </div>
       </div>
 
-      {!isPlanMode && state.progress?.status === "choosing_book" && <ProposalCard state={state} me={me} action={proposalAction} />}
+      {!isPlanMode && (
+        <div className="lg:hidden">
+          <NextBookCard state={state} me={me} action={proposalAction} />
+        </div>
+      )}
       {isPlanMode
         ? <p className="text-center text-xs text-[#A89AA0]">지금 함께 읽는 책: {todaySegments[todaySegments.length - 1]?.book_name ?? ""}</p>
         : book && <p className="text-center text-xs text-[#A89AA0]">지금 함께 읽는 책: {book.name}</p>}
@@ -1025,7 +1089,7 @@ function ReadingView({
             </button>
           ))}
         </div>
-        {state.readingMode !== "plan" && <ProposalCard state={state} me={me} action={proposalAction} compact />}
+        {state.readingMode !== "plan" && <NextBookCard state={state} me={me} action={proposalAction} compact />}
       </div>
 
       <div className="space-y-5">
@@ -1588,112 +1652,63 @@ function getBookIdsWithReadingRecord(state: AppState) {
   return bookIds;
 }
 
-function ProposalCard({ state, me, action, compact }: { state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void>; compact?: boolean }) {
-  const pending = state.proposals.find((item) => item.status === "pending");
-  const accepted = state.proposals.find((item) => item.status === "accepted");
+function NextBookCard({ state, me, action, compact }: { state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void>; compact?: boolean }) {
   const readBookIds = useMemo(() => getBookIdsWithReadingRecord(state), [state]);
-  const defaultBookId = useMemo(() => {
-    const activeProposalBookIds = new Set([pending?.proposed_book_id, accepted?.proposed_book_id].filter((id): id is string => Boolean(id)));
-    return (
-      state.books.find((book) => !readBookIds.has(book.id) && !activeProposalBookIds.has(book.id))?.id ??
-      state.books.find((book) => book.id !== state.progress?.current_book_id)?.id ??
-      state.books[0]?.id ??
-      ""
-    );
-  }, [accepted?.proposed_book_id, pending?.proposed_book_id, readBookIds, state.books, state.progress?.current_book_id]);
-  const [bookId, setBookId] = useState(defaultBookId);
-  const [note, setNote] = useState("");
-  const [editingProposal, setEditingProposal] = useState(false);
-  const [localProposal, setLocalProposal] = useState<{ status: "pending" | "accepted"; proposed_book_id: string; proposed_by: string; note: string | null } | null>(null);
-  const localPending = localProposal?.status === "pending" ? localProposal : null;
-  const localAccepted = localProposal?.status === "accepted" ? localProposal : null;
-  const activePending = localAccepted ? null : localPending ?? pending;
-  const activeAccepted = localAccepted ?? accepted;
-  const pendingBook = state.books.find((book) => book.id === activePending?.proposed_book_id);
-  const acceptedBook = state.books.find((book) => book.id === activeAccepted?.proposed_book_id);
-  const proposedByMe = activePending?.proposed_by === me.id;
-  const showProposalForm = (!activePending && (!activeAccepted || editingProposal)) || Boolean(activePending && proposedByMe && editingProposal);
+  const nextBook = state.nextBook;
+  const nextBookInfo = state.books.find((book) => book.id === nextBook?.bookId);
+  const [editing, setEditing] = useState(false);
+  const [bookId, setBookId] = useState(nextBook?.bookId ?? "");
 
   useEffect(() => {
-    setLocalProposal(null);
-    setEditingProposal(false);
-  }, [pending?.id, accepted?.id]);
+    setEditing(false);
+    setBookId(nextBook?.bookId ?? "");
+  }, [nextBook?.bookId]);
 
-  useEffect(() => {
-    if (!bookId && defaultBookId) setBookId(defaultBookId);
-  }, [bookId, defaultBookId]);
+  if (!nextBook) return null;
 
-  const openProposalForm = () => {
-    setBookId(defaultBookId);
-    setEditingProposal(true);
+  const openEditor = () => {
+    setBookId(nextBook.bookId);
+    setEditing(true);
   };
 
-  const submitProposal = () => {
-    const nextBookId = bookId || defaultBookId;
-    if (!nextBookId) return;
-    const nextNote = note.trim();
-    setLocalProposal({ status: "pending", proposed_book_id: nextBookId, proposed_by: me.id, note: nextNote || null });
-    setEditingProposal(false);
-    setNote("");
-    void action(() => apiAction("propose_book", { bookId: nextBookId, note: nextNote }));
+  const submit = () => {
+    if (!bookId) return;
+    setEditing(false);
+    void action(() => apiAction("set_next_book", { bookId }));
   };
 
   return (
     <div className={`card mt-4 rounded-3xl p-4 ${compact ? "" : "sticky top-5"}`}>
       <h3 className="font-black">다음 책</h3>
-      {activePending ? (
-        <div className="mt-3 rounded-2xl bg-[#FFF8F1] p-3 text-sm">
-          <p className="font-bold">{pendingBook?.name} 제안 중</p>
-          <p className="mt-1 text-[#8B7088]">{activePending.note || "같이 읽어볼까요?"}</p>
-          {proposedByMe ? (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <p className="text-xs text-[#A89AA0]">다른 멤버의 수락을 기다리는 중이에요.</p>
-              <button onClick={openProposalForm} className="inline-flex items-center gap-1 rounded-xl bg-white px-3 py-2 text-xs font-bold text-[#8B7088]">
-                <RefreshCw size={13} />
-                다른 책 제안
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => {
-                if (!pending) return;
-                setLocalProposal({ status: "accepted", proposed_book_id: pending.proposed_book_id, proposed_by: pending.proposed_by, note: pending.note });
-                void action(() => apiAction("accept_proposal", { id: pending.id }));
-              }}
-              className="mt-3 rounded-xl px-3 py-2 text-sm font-bold text-white"
-              style={{ background: me.accent_color }}
-            >
-              수락하기
-            </button>
-          )}
-        </div>
-      ) : activeAccepted ? (
-        <div className="mt-3 rounded-2xl bg-[#FFF8F1] p-3 text-sm">
-          <p className="font-bold">{acceptedBook?.name} 확정</p>
-          <p className="mt-1 text-[#8B7088]">지금 읽는 책이 끝난 다음 날 1장이 열려요.</p>
-          <button onClick={openProposalForm} className="mt-3 inline-flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-sm font-bold text-[#8B7088]">
-            <RefreshCw size={14} />
-            다른 책 제안하기
-          </button>
-        </div>
-      ) : null}
+      <div className="mt-3 rounded-2xl bg-[#FFF8F1] p-3 text-sm">
+        <p className="font-bold">{nextBookInfo?.name ?? "정하는 중"}</p>
+        <p className="mt-1 text-[#8B7088]">{nextBook.isOwnerPick ? "방장이 정했어요" : "자동으로 정해져요"}</p>
+      </div>
 
-      {showProposalForm && (
+      {state.isOwner && !editing && (
+        <button onClick={openEditor} className="mt-3 inline-flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-sm font-bold text-[#8B7088]">
+          <RefreshCw size={14} />
+          다음 책 바꾸기
+        </button>
+      )}
+
+      {state.isOwner && editing && (
         <div className="mt-3 space-y-2">
           <select value={bookId} onChange={(event) => setBookId(event.target.value)} className="w-full rounded-xl border border-[#F2DCE5] bg-white px-3 py-2 text-sm">
             {state.books.map((book) => (
               <option key={book.id} value={book.id}>{book.name}{readBookIds.has(book.id) ? " (읽은 기록 있음)" : ""}</option>
             ))}
           </select>
-          <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="짧은 제안 메모" className="w-full rounded-xl border border-[#F2DCE5] px-3 py-2 text-sm" />
-          <button
-            disabled={!bookId && !defaultBookId}
-            onClick={submitProposal}
-            className="w-full rounded-xl px-3 py-2 text-sm font-bold text-white disabled:cursor-default disabled:opacity-50"
-            style={{ background: me.accent_color }}
-          >
-            제안하기
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={submit}
+              className="flex-1 rounded-xl px-3 py-2 text-sm font-bold text-white disabled:cursor-default disabled:opacity-50"
+              style={{ background: me.accent_color }}
+            >
+              정하기
+            </button>
+            <button onClick={() => setEditing(false)} className="rounded-xl bg-white px-3 py-2 text-sm text-[#8B7088]">취소</button>
+          </div>
         </div>
       )}
     </div>
@@ -1726,6 +1741,36 @@ function NotificationsView({ state, action, onNavigate }: { state: AppState; act
         </button>
       ))}
       {notifications.length === 0 && <p className="rounded-2xl bg-white p-4 text-center text-sm text-[#8B7088]">새 알림이 없어요.</p>}
+    </div>
+  );
+}
+
+function GroupInfoView({ state }: { state: AppState }) {
+  const [copied, setCopied] = useState(false);
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <p className="text-xs font-bold text-[#8B7088]">그룹 이름</p>
+        <p className="mt-1 text-lg font-bold">{state.groupName}</p>
+      </div>
+      <div className="card rounded-2xl p-6 text-center">
+        <p className="text-xs font-bold text-[#8B7088]">초대코드</p>
+        <p className="mt-2 text-3xl font-black tracking-[0.2em]">{state.inviteCode}</p>
+        <button
+          onClick={() => {
+            void navigator.clipboard?.writeText(state.inviteCode);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }}
+          className="mt-4 inline-flex items-center gap-1 rounded-xl bg-white px-4 py-2 text-sm font-bold text-[#8B7088]"
+        >
+          <Copy size={14} /> {copied ? "복사됨" : "복사하기"}
+        </button>
+      </div>
+      <p className="text-center text-xs text-[#A89AA0]">
+        코드를 잃어버려도 로그인된 멤버가 있으면 이 화면에서 다시 확인할 수 있어요.
+      </p>
     </div>
   );
 }

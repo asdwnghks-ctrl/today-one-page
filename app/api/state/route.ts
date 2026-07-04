@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { advanceAfterDailyResetIfDue } from "@/lib/reading-progress";
+import { advanceAfterDailyResetIfDue, resolveNextBook } from "@/lib/reading-progress";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
 function isMissingSessionIdColumn(error: { code?: string; message?: string } | null) {
@@ -28,8 +28,12 @@ async function fetchAllSegments() {
 const LOGGED_OUT_STATE = {
   me: null,
   profiles: [],
+  groupName: "",
+  inviteCode: "",
+  isOwner: false,
   readingMode: "daily_one" as const,
   planDay: null,
+  nextBook: null,
   sections: [],
   books: [],
   segments: [],
@@ -60,7 +64,7 @@ export async function GET() {
   }
 
   const [groupRes, profilesRes] = await Promise.all([
-    supabaseAdmin.from("groups").select("id,reading_mode").eq("id", groupId).maybeSingle(),
+    supabaseAdmin.from("groups").select("id,name,invite_code,owner_id,reading_mode").eq("id", groupId).maybeSingle(),
     supabaseAdmin
       .from("profiles")
       .select("id,slug,display_name,color_key,accent_color,accent_deep,accent_soft,group_id")
@@ -116,6 +120,13 @@ export async function GET() {
   ]);
 
   const progress = progressRes.data ?? null;
+  const isOwner = group.owner_id != null && group.owner_id === me.id;
+
+  let nextBook: { bookId: string; isOwnerPick: boolean } | null = null;
+  if (group.reading_mode === "daily_one" && progress?.current_book_id) {
+    const resolved = await resolveNextBook(groupId, progress.current_book_id);
+    nextBook = { bookId: resolved.bookId, isOwnerPick: resolved.source === "owner" };
+  }
 
   let planDay: { day_index: number; book_id: string; segment_ids: string[] } | null = null;
   if (group.reading_mode === "plan" && progress?.plan_day_index != null) {
@@ -264,8 +275,12 @@ export async function GET() {
   return NextResponse.json({
     me,
     profiles,
+    groupName: group.name,
+    inviteCode: group.invite_code,
+    isOwner,
     readingMode: group.reading_mode,
     planDay,
+    nextBook,
     sections: sectionsRes.data ?? [],
     books: booksRes.data ?? [],
     segments: segmentsRes.data ?? [],
