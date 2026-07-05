@@ -254,6 +254,25 @@ export async function POST(request: NextRequest) {
         break;
       }
 
+      case "update_my_name": {
+        const displayName = asString(payload.displayName);
+        if (!displayName || displayName.length > 20) throw new Error("이름을 확인해 주세요");
+        const { error } = await supabaseAdmin.from("profiles").update({ display_name: displayName }).eq("id", actor.id);
+        if (error) throw error;
+        break;
+      }
+
+      case "update_group_name": {
+        const groupName = asString(payload.groupName);
+        if (!groupName || groupName.length > 40) throw new Error("그룹 이름을 확인해 주세요");
+        const { data: group, error: groupError } = await supabaseAdmin.from("groups").select("owner_id").eq("id", actor.group_id).single();
+        if (groupError) throw groupError;
+        if (group.owner_id !== actor.id) throw new Error("방장만 그룹 이름을 바꿀 수 있어요");
+        const { error } = await supabaseAdmin.from("groups").update({ name: groupName }).eq("id", actor.group_id);
+        if (error) throw error;
+        break;
+      }
+
       case "manual_advance": {
         const result = await manualAdvanceIfAllowed(actor.group_id, actor.id);
         if (result.segmentId) {

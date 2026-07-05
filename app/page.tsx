@@ -93,7 +93,7 @@ export default function Page() {
   const [pin, setPin] = useState("");
   const [tab, setTab] = useState<Tab>("today");
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
-  const [selectedBookId, setSelectedBookId] = useState<string>("ecc");
+  const [selectedBookId, setSelectedBookId] = useState<string>("");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [realtimeStatus, setRealtimeStatus] = useState("CLOSED");
   const [loginPending, setLoginPending] = useState(false);
@@ -187,6 +187,12 @@ export default function Page() {
   const activeSegment = state?.segments.find((segment) => segment.id === selectedSegmentId) ?? currentSegment;
   const currentBook = state?.books.find((book) => book.id === state.progress?.current_book_id) ?? null;
   const unreadCount = state?.notifications.filter((item) => !item.read_at).length ?? 0;
+
+  useEffect(() => {
+    if (!selectedBookId && state?.progress?.current_book_id) {
+      setSelectedBookId(state.progress.current_book_id);
+    }
+  }, [selectedBookId, state?.progress?.current_book_id]);
 
   const quietlyMarkNotificationsRead = useCallback(
     async (types: string[]) => {
@@ -788,7 +794,7 @@ export default function Page() {
 
       {groupInfoOpen && (
         <Drawer title="그룹 정보" onClose={() => setGroupInfoOpen(false)}>
-          <GroupInfoView state={appState} />
+          <GroupInfoView state={appState} me={me} action={refreshAfterSilently} />
         </Drawer>
       )}
       <div className="fixed bottom-[78px] right-4 z-20 rounded-full bg-white/80 px-3 py-1 text-[11px] text-[#8B7088] shadow-sm">
@@ -978,13 +984,13 @@ function TodayView({
             </>
           )}
         </h2>
-        <p className="mt-2 text-sm text-[#8B7088]">
-          {showManualAdvance
-            ? `${missedProfiles.join(", ")}님이 전날 못 읽어서 멈춰 있어요.`
-            : allRead
-              ? "오늘은 모두 읽었어요. 새벽 2시에 다음 범위가 열려요."
-              : "여유 있을 때 천천히, 함께."}
-        </p>
+        {(showManualAdvance || allRead) && (
+          <p className="mt-2 text-sm text-[#8B7088]">
+            {showManualAdvance
+              ? `${missedProfiles.join(", ")}님이 전날 못 읽어서 멈춰 있어요.`
+              : "오늘은 모두 읽었어요. 새벽 2시에 다음 범위가 열려요."}
+          </p>
+        )}
         <div className={`mt-6 grid gap-3 ${showManualAdvance ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
           <a
             href={todaySegments[0]?.jw_url ?? undefined}
@@ -1745,15 +1751,57 @@ function NotificationsView({ state, action, onNavigate }: { state: AppState; act
   );
 }
 
-function GroupInfoView({ state }: { state: AppState }) {
+function GroupInfoView({ state, me, action }: { state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void> }) {
   const [copied, setCopied] = useState(false);
+  const [editingGroupName, setEditingGroupName] = useState(false);
+  const [groupNameDraft, setGroupNameDraft] = useState(state.groupName);
+  const [editingMyName, setEditingMyName] = useState(false);
+  const [myNameDraft, setMyNameDraft] = useState(me.display_name);
 
   return (
     <div className="space-y-4">
       <div>
         <p className="text-xs font-bold text-[#8B7088]">그룹 이름</p>
-        <p className="mt-1 text-lg font-bold">{state.groupName}</p>
+        {editingGroupName ? (
+          <div className="mt-2 flex gap-2">
+            <input
+              value={groupNameDraft}
+              onChange={(event) => setGroupNameDraft(event.target.value)}
+              className="focus-ring min-w-0 flex-1 rounded-xl border border-[#F2DCE5] bg-white px-3 py-2 text-sm"
+              autoFocus
+            />
+            <button
+              onClick={() => {
+                const name = groupNameDraft.trim();
+                if (!name) return;
+                setEditingGroupName(false);
+                void action(() => apiAction("update_group_name", { groupName: name }));
+              }}
+              className="rounded-xl px-3 py-2 text-sm font-bold text-white"
+              style={{ background: me.accent_color }}
+            >
+              저장
+            </button>
+          </div>
+        ) : (
+          <div className="mt-1 flex items-center gap-2">
+            <p className="text-lg font-bold">{state.groupName}</p>
+            {state.isOwner && (
+              <button
+                onClick={() => {
+                  setGroupNameDraft(state.groupName);
+                  setEditingGroupName(true);
+                }}
+                className="text-[#8B7088]"
+                aria-label="그룹 이름 수정"
+              >
+                <Pencil size={14} />
+              </button>
+            )}
+          </div>
+        )}
       </div>
+
       <div className="card rounded-2xl p-6 text-center">
         <p className="text-xs font-bold text-[#8B7088]">초대코드</p>
         <p className="mt-2 text-3xl font-black tracking-[0.2em]">{state.inviteCode}</p>
@@ -1771,6 +1819,56 @@ function GroupInfoView({ state }: { state: AppState }) {
       <p className="text-center text-xs text-[#A89AA0]">
         코드를 잃어버려도 로그인된 멤버가 있으면 이 화면에서 다시 확인할 수 있어요.
       </p>
+
+      <div>
+        <p className="text-xs font-bold text-[#8B7088]">멤버</p>
+        <div className="mt-2 space-y-2">
+          {state.profiles.map((profile) => (
+            <div key={profile.id} className="card flex items-center justify-between gap-2 rounded-2xl px-4 py-3">
+              <div className="flex items-center gap-2">
+                <span className="h-3 w-3 rounded-full" style={{ background: profile.accent_color }} />
+                {profile.id === me.id && editingMyName ? (
+                  <input
+                    value={myNameDraft}
+                    onChange={(event) => setMyNameDraft(event.target.value)}
+                    className="focus-ring min-w-0 rounded-xl border border-[#F2DCE5] bg-white px-2 py-1 text-sm"
+                    autoFocus
+                  />
+                ) : (
+                  <p className="font-bold" style={{ color: profile.accent_color }}>{profile.display_name}</p>
+                )}
+              </div>
+              {profile.id === me.id && (
+                editingMyName ? (
+                  <button
+                    onClick={() => {
+                      const name = myNameDraft.trim();
+                      if (!name) return;
+                      setEditingMyName(false);
+                      void action(() => apiAction("update_my_name", { displayName: name }));
+                    }}
+                    className="rounded-xl px-3 py-1 text-xs font-bold text-white"
+                    style={{ background: me.accent_color }}
+                  >
+                    저장
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setMyNameDraft(profile.display_name);
+                      setEditingMyName(true);
+                    }}
+                    className="text-[#8B7088]"
+                    aria-label="내 이름 수정"
+                  >
+                    <Pencil size={14} />
+                  </button>
+                )
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
