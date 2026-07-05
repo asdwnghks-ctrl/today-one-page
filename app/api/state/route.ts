@@ -8,19 +8,21 @@ function isMissingSessionIdColumn(error: { code?: string; message?: string } | n
 }
 
 // The hosted project caps PostgREST responses at 1000 rows regardless of the
-// requested range, so segments (1189 rows) has to be paged through manually.
-async function fetchAllSegments() {
+// requested range, so tables larger than that (segments, verse_counts) have
+// to be paged through manually.
+async function fetchAllRows(table: string, columns: string, orderBy: string) {
   const pageSize = 1000;
   const rows: Record<string, unknown>[] = [];
   for (let from = 0; ; from += pageSize) {
     const { data, error } = await supabaseAdmin
-      .from("segments")
-      .select("*")
-      .order("global_order")
+      .from(table)
+      .select(columns)
+      .order(orderBy)
       .range(from, from + pageSize - 1);
     if (error) return { data: null, error };
-    rows.push(...(data ?? []));
-    if (!data || data.length < pageSize) break;
+    const page = (data ?? []) as unknown as Record<string, unknown>[];
+    rows.push(...page);
+    if (page.length < pageSize) break;
   }
   return { data: rows, error: null };
 }
@@ -104,7 +106,7 @@ export async function GET() {
   ] = await Promise.all([
     supabaseAdmin.from("sections").select("*").order("sort_order"),
     supabaseAdmin.from("books").select("*").order("sort_order"),
-    fetchAllSegments(),
+    fetchAllRows("segments", "*", "global_order"),
     supabaseAdmin.from("reading_progress").select("*").eq("group_id", groupId).maybeSingle(),
     supabaseAdmin
       .from("reading_states")
@@ -116,7 +118,7 @@ export async function GET() {
     supabaseAdmin.from("replies").select("*").in("profile_id", profileIds).is("deleted_at", null).order("created_at"),
     supabaseAdmin.from("reactions").select("*").in("profile_id", profileIds),
     supabaseAdmin.from("book_proposals").select("*").eq("group_id", groupId).order("created_at", { ascending: false }).limit(10),
-    supabaseAdmin.from("verse_counts").select("book_id,chapter,verse_count"),
+    fetchAllRows("verse_counts", "book_id,chapter,verse_count", "id"),
   ]);
 
   const progress = progressRes.data ?? null;
@@ -154,7 +156,7 @@ export async function GET() {
       .select("segment_id,profile_id")
       .eq("session_id", progress.session_id)
       .in("profile_id", profileIds);
-    const [missesRes, giftsRes, revealedGiftsRes] = await Promise.all([
+    const [missesRes, giftsRes, latestRevealedRes] = await Promise.all([
       currentMissesQuery,
       supabaseAdmin
         .from("book_gifts")
@@ -163,14 +165,31 @@ export async function GET() {
         .in("profile_id", profileIds),
       supabaseAdmin
         .from("book_gifts")
-        .select("id,session_id,profile_id,gift_description,is_revealed,revealed_at,created_at")
+        .select("session_id")
         .eq("is_revealed", true)
         .in("profile_id", profileIds)
         .order("revealed_at", { ascending: false })
-        .limit(6),
+        .limit(1)
+        .maybeSingle(),
     ]);
-    if ((missesRes.error && !isMissingSessionIdColumn(missesRes.error)) || giftsRes.error || revealedGiftsRes.error) {
-      return NextResponse.json({ error: missesRes.error?.message ?? giftsRes.error?.message ?? revealedGiftsRes.error?.message }, { status: 500 });
+    if ((missesRes.error && !isMissingSessionIdColumn(missesRes.error)) || giftsRes.error || latestRevealedRes.error) {
+      return NextResponse.json({ error: missesRes.error?.message ?? giftsRes.error?.message ?? latestRevealedRes.error?.message }, { status: 500 });
+    }
+
+    // 가장 최근에 공개된 세션의 선물만 보여준다 — 예전 책의 공개된 선물이 계속 같이 뜨지 않도록.
+    let revealedGiftsRes: { data: { id: string; session_id: string; profile_id: string; gift_description: string; is_revealed: boolean; revealed_at: string | null; created_at: string }[] | null; error: null } = {
+      data: [],
+      error: null,
+    };
+    if (latestRevealedRes.data?.session_id) {
+      const { data, error } = await supabaseAdmin
+        .from("book_gifts")
+        .select("id,session_id,profile_id,gift_description,is_revealed,revealed_at,created_at")
+        .eq("session_id", latestRevealedRes.data.session_id)
+        .eq("is_revealed", true)
+        .in("profile_id", profileIds);
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      revealedGiftsRes = { data, error: null };
     }
 
     for (const profile of profiles) missCounts[profile.id] = 0;
