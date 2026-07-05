@@ -339,7 +339,12 @@ async function recordMissesIfDue(
     .from("reading_misses")
     .upsert(rows, { onConflict: "segment_id,profile_id,missed_boundary", ignoreDuplicates: true });
   if (isMissingSessionIdColumn(error)) {
-    const legacyRows = rows.map(({ session_id: _sessionId, ...row }) => row);
+    const legacyRows = rows.map(({ segment_id, profile_id, book_id, missed_boundary }) => ({
+      segment_id,
+      profile_id,
+      book_id,
+      missed_boundary,
+    }));
     const { error: legacyError } = await supabaseAdmin
       .from("reading_misses")
       .upsert(legacyRows, { onConflict: "segment_id,profile_id,missed_boundary", ignoreDuplicates: true });

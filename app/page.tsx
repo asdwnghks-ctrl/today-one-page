@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Bell,
   BookOpen,
@@ -10,6 +10,8 @@ import {
   Heart,
   Home,
   Library,
+  LoaderCircle,
+  LogOut,
   Pencil,
   RefreshCw,
   Sparkles,
@@ -34,8 +36,34 @@ import { supabaseBrowser } from "@/lib/supabase-browser";
 
 type Tab = "today" | "reading" | "records";
 type AuthMode = "landing" | "enter-code" | "pick-profile" | "create-group" | "join-group";
+type ActionRunner = (fn: () => Promise<unknown>) => Promise<boolean>;
 
 const HIGHLIGHT_COLORS = ["#F4B5C9", "#C8B5E8", "#B5D5E8", "#B8C49B"];
+
+function normalizeInviteCode(value: string) {
+  return value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand("copy");
+  input.remove();
+}
+
+function scrollToTop() {
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+}
 
 function formatDate(value?: string | null) {
   if (!value) return "";
@@ -80,7 +108,7 @@ async function apiAction(type: string, payload?: Record<string, unknown>) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ type, payload }),
   });
-  const json = await response.json();
+  const json = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(json.error || "요청을 처리하지 못했어요");
   return json;
 }
@@ -97,6 +125,7 @@ export default function Page() {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [realtimeStatus, setRealtimeStatus] = useState("CLOSED");
   const [loginPending, setLoginPending] = useState(false);
+  const [pendingActions, setPendingActions] = useState(0);
   const broadcastChangeRef = useRef<(() => void) | null>(null);
   const notificationMarkingRef = useRef(false);
 
@@ -118,6 +147,8 @@ export default function Page() {
   const [startBookIdInput, setStartBookIdInput] = useState("");
   const [startDayIndexInput, setStartDayIndexInput] = useState(READING_PLAN_SECTIONS[0].startDay);
   const [groupInfoOpen, setGroupInfoOpen] = useState(false);
+  const [inviteCopied, setInviteCopied] = useState(false);
+  const effectiveStartBookId = startBookIdInput || publicBooks[0]?.id || "";
 
   useEffect(() => {
     fetch("/api/books")
@@ -126,19 +157,16 @@ export default function Page() {
       .catch(() => undefined);
   }, []);
 
-  useEffect(() => {
-    if (!startBookIdInput && publicBooks.length) setStartBookIdInput(publicBooks[0].id);
-  }, [publicBooks, startBookIdInput]);
-
   const fetchState = useCallback(async () => {
     const response = await fetch("/api/state", { cache: "no-store" });
-    const json = await response.json();
+    const json = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(json.error || "상태를 불러오지 못했어요");
     setState(json);
     setLoading(false);
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Initial server state is intentionally loaded after hydration.
     fetchState().catch((err) => {
       setError(err.message);
       setLoading(false);
@@ -146,10 +174,12 @@ export default function Page() {
   }, [fetchState]);
 
   useEffect(() => {
-    if (!state?.me) return;
+    const groupId = state?.me?.group_id;
+    const actorId = state?.me?.id;
+    if (!groupId || !actorId) return;
 
     let refreshTimer: number | null = null;
-    const channel = supabaseBrowser.channel(`group-${state.me.group_id}-live`);
+    const channel = supabaseBrowser.channel(`group-${groupId}-live`);
 
     const scheduleRefresh = () => {
       if (refreshTimer) window.clearTimeout(refreshTimer);
@@ -167,7 +197,7 @@ export default function Page() {
         type: "broadcast",
         event: "state_changed",
         payload: {
-          actorId: state.me?.id,
+          actorId,
           at: Date.now(),
         },
       });
@@ -178,7 +208,7 @@ export default function Page() {
       broadcastChangeRef.current = null;
       void supabaseBrowser.removeChannel(channel);
     };
-  }, [fetchState, state?.me?.display_name, state?.me?.id, state?.me?.group_id]);
+  }, [fetchState, state?.me?.id, state?.me?.group_id]);
 
   const me = state?.me ?? null;
   const profiles = state?.profiles ?? [];
@@ -187,70 +217,54 @@ export default function Page() {
   const activeSegment = state?.segments.find((segment) => segment.id === selectedSegmentId) ?? currentSegment;
   const currentBook = state?.books.find((book) => book.id === state.progress?.current_book_id) ?? null;
   const unreadCount = state?.notifications.filter((item) => !item.read_at).length ?? 0;
+  const effectiveSelectedBookId = selectedBookId || state?.progress?.current_book_id || "";
 
-  useEffect(() => {
-    if (!selectedBookId && state?.progress?.current_book_id) {
-      setSelectedBookId(state.progress.current_book_id);
+  async function quietlyMarkNotificationsRead(types: string[]) {
+    if (!state?.me || notificationMarkingRef.current) return;
+    const hasUnread = state.notifications.some((item) => !item.read_at && types.includes(item.type));
+    if (!hasUnread) return;
+
+    notificationMarkingRef.current = true;
+    const readAt = new Date().toISOString();
+    setState((prev) =>
+      prev
+        ? {
+            ...prev,
+            notifications: prev.notifications.map((item) =>
+              !item.read_at && types.includes(item.type) ? { ...item, read_at: readAt } : item,
+            ),
+          }
+        : prev,
+    );
+    try {
+      await apiAction("mark_notifications_read", { types });
+      await fetchState();
+    } catch {
+      fetchState().catch(() => undefined);
+    } finally {
+      notificationMarkingRef.current = false;
     }
-  }, [selectedBookId, state?.progress?.current_book_id]);
-
-  const quietlyMarkNotificationsRead = useCallback(
-    async (types: string[]) => {
-      if (!state?.me || notificationMarkingRef.current) return;
-      const hasUnread = state.notifications.some((item) => !item.read_at && types.includes(item.type));
-      if (!hasUnread) return;
-
-      notificationMarkingRef.current = true;
-      const readAt = new Date().toISOString();
-      setState((prev) =>
-        prev
-          ? {
-              ...prev,
-              notifications: prev.notifications.map((item) =>
-                !item.read_at && types.includes(item.type) ? { ...item, read_at: readAt } : item,
-              ),
-            }
-          : prev,
-      );
-      try {
-        await apiAction("mark_notifications_read", { types });
-        await fetchState();
-      } catch {
-        fetchState().catch(() => undefined);
-      } finally {
-        notificationMarkingRef.current = false;
-      }
-    },
-    [fetchState, state?.me, state?.notifications],
-  );
-
-  useEffect(() => {
-    if (tab !== "reading") return;
-    void quietlyMarkNotificationsRead(["comment", "reply"]);
-  }, [quietlyMarkNotificationsRead, tab]);
+  }
 
   async function refreshAfter(action: () => Promise<unknown>) {
     setError("");
+    setPendingActions((current) => current + 1);
     try {
       await action();
       await fetchState();
       broadcastChangeRef.current?.();
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "요청을 처리하지 못했어요");
       fetchState().catch(() => undefined);
+      return false;
+    } finally {
+      setPendingActions((current) => Math.max(0, current - 1));
     }
   }
 
   async function refreshAfterSilently(action: () => Promise<unknown>) {
-    setError("");
-    try {
-      await action();
-      await fetchState();
-      broadcastChangeRef.current?.();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "요청을 처리하지 못했어요");
-      fetchState().catch(() => undefined);
-    }
+    return refreshAfter(action);
   }
 
   async function login(groupId: string, slug: string) {
@@ -263,13 +277,15 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ groupId, slug, pin }),
       });
-      const json = await response.json();
+      const json = await response.json().catch(() => ({}));
       if (!response.ok) {
         setError(json.error || "비밀번호를 다시 확인해 주세요");
         return;
       }
       setPin("");
       await fetchState();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "로그인하지 못했어요. 연결을 확인해 주세요");
     } finally {
       setLoginPending(false);
     }
@@ -298,17 +314,19 @@ export default function Page() {
           colorKey: colorKeyInput,
           pin,
           readingMode: readingModeInput,
-          startBookId: readingModeInput === "daily_one" ? startBookIdInput : undefined,
+          startBookId: readingModeInput === "daily_one" ? effectiveStartBookId : undefined,
           startDayIndex: readingModeInput === "plan" ? startDayIndexInput : undefined,
         }),
       });
-      const json = await response.json();
+      const json = await response.json().catch(() => ({}));
       if (!response.ok) {
         setError(json.error || "그룹을 만들지 못했어요");
         return;
       }
       setPin("");
       setCreatedInviteCode(json.inviteCode);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "그룹을 만들지 못했어요. 다시 시도해 주세요");
     } finally {
       setAuthPending(false);
     }
@@ -319,14 +337,18 @@ export default function Page() {
     setAuthPending(true);
     setError("");
     try {
-      const response = await fetch(`/api/groups/lookup?code=${encodeURIComponent(code)}`);
-      const json = await response.json();
+      const normalizedCode = normalizeInviteCode(code);
+      const response = await fetch(`/api/groups/lookup?code=${encodeURIComponent(normalizedCode)}`);
+      const json = await response.json().catch(() => ({}));
       if (!response.ok) {
         setError(json.error || "초대 코드를 다시 확인해 주세요");
         return;
       }
       setLookup(json);
+      setInviteCodeInput(normalizedCode);
       setAuthMode("pick-profile");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "초대 코드를 확인하지 못했어요. 다시 시도해 주세요");
     } finally {
       setAuthPending(false);
     }
@@ -347,13 +369,15 @@ export default function Page() {
           pin,
         }),
       });
-      const json = await response.json();
+      const json = await response.json().catch(() => ({}));
       if (!response.ok) {
         setError(json.error || "그룹에 참여하지 못했어요");
         return;
       }
       setPin("");
       await fetchState();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "그룹에 참여하지 못했어요. 다시 시도해 주세요");
     } finally {
       setAuthPending(false);
     }
@@ -378,26 +402,43 @@ export default function Page() {
     await refreshAfter(() => apiAction("check_read", { segmentIds }));
   }
 
+  function changeTab(nextTab: Tab) {
+    setTab(nextTab);
+    if (nextTab === "reading") void quietlyMarkNotificationsRead(["comment", "reply"]);
+    requestAnimationFrame(scrollToTop);
+  }
+
+  function openSegment(segmentId: string, nextTab: Tab) {
+    const segment = state?.segments.find((item) => item.id === segmentId);
+    if (segment) setSelectedBookId(segment.book_id);
+    setSelectedSegmentId(segmentId);
+    changeTab(nextTab);
+  }
+
   if (loading) {
     return (
       <main className="relative z-10 flex min-h-screen items-center justify-center px-6">
-        <div className="card rounded-3xl px-6 py-5 text-sm text-[#8B7088]">천천히 준비하는 중...</div>
+        <div className="card flex items-center gap-3 rounded-3xl px-6 py-5 text-sm text-[#8B7088]" role="status" aria-live="polite">
+          <LoaderCircle className="animate-spin" size={18} aria-hidden="true" />
+          함께 읽을 공간을 준비하고 있어요
+        </div>
       </main>
     );
   }
 
   if (!me) {
     const header = (
-      <div className="mb-10 pt-16 text-center">
+      <div className="mb-8 pt-8 text-center sm:mb-10 sm:pt-16">
         <div className="mb-5 inline-flex gap-2 text-[#A93F62]">
           <Sparkles size={18} />
           <Sparkles size={18} className="text-[#C8B5E8]" />
           <Sparkles size={18} className="text-[#B5D5E8]" />
         </div>
-        <h1 className="text-5xl font-black leading-tight tracking-normal">
+        <h1 className="text-4xl font-black leading-tight tracking-normal sm:text-5xl">
           오늘도<br />
           <span className="text-[#A93F62]">한 페이지</span>
         </h1>
+        <p className="mt-4 text-sm leading-6 text-[#8B7088]">함께 읽고, 마음에 남은 구절을 나눠요.</p>
       </div>
     );
 
@@ -411,10 +452,17 @@ export default function Page() {
             <p className="mt-2 text-xs text-[#8B7088]">이 코드를 함께 읽을 사람에게 공유해 주세요.</p>
             <div className="mt-4 flex justify-center gap-2">
               <button
-                onClick={() => void navigator.clipboard?.writeText(createdInviteCode)}
+                onClick={() => {
+                  void copyText(createdInviteCode)
+                    .then(() => {
+                      setInviteCopied(true);
+                      window.setTimeout(() => setInviteCopied(false), 1500);
+                    })
+                    .catch(() => setError("초대 코드를 복사하지 못했어요"));
+                }}
                 className="inline-flex items-center gap-1 rounded-xl bg-white px-4 py-2 text-sm font-bold text-[#8B7088]"
               >
-                <Copy size={14} /> 복사하기
+                <Copy size={14} /> {inviteCopied ? "복사됨" : "복사하기"}
               </button>
               <button
                 onClick={() => {
@@ -464,47 +512,67 @@ export default function Page() {
         {authMode === "enter-code" && (
           <div className="space-y-3">
             <BackButton onClick={() => setAuthMode("landing")} />
-            <div className="card rounded-2xl p-4">
-              <label className="text-xs font-bold text-[#8B7088]">초대코드</label>
+            <form
+              className="card rounded-2xl p-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void lookupInviteCode(inviteCodeInput);
+              }}
+            >
+              <label htmlFor="invite-code" className="text-xs font-bold text-[#8B7088]">초대코드</label>
               <input
+                id="invite-code"
                 value={inviteCodeInput}
-                onChange={(event) => setInviteCodeInput(event.target.value.toUpperCase())}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") void lookupInviteCode(inviteCodeInput);
-                }}
+                onChange={(event) => setInviteCodeInput(normalizeInviteCode(event.target.value))}
                 className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base tracking-[0.2em]"
+                autoCapitalize="characters"
+                autoComplete="one-time-code"
+                spellCheck={false}
+                maxLength={6}
                 autoFocus
               />
               <button
+                type="submit"
                 disabled={authPending || !inviteCodeInput.trim()}
-                onClick={() => void lookupInviteCode(inviteCodeInput)}
                 className="mt-3 w-full rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-60"
                 style={{ background: "#A93F62" }}
               >
                 {authPending ? "확인 중" : "확인"}
               </button>
-            </div>
+            </form>
           </div>
         )}
 
         {authMode === "create-group" && (
           <div className="space-y-3">
             <BackButton onClick={() => setAuthMode("landing")} />
-            <div className="card space-y-3 rounded-2xl p-4">
+            <form
+              className="card space-y-3 rounded-2xl p-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createGroup();
+              }}
+            >
               <div>
-                <label className="text-xs font-bold text-[#8B7088]">그룹 이름</label>
+                <label htmlFor="group-name" className="text-xs font-bold text-[#8B7088]">그룹 이름</label>
                 <input
+                  id="group-name"
                   value={groupNameInput}
                   onChange={(event) => setGroupNameInput(event.target.value)}
                   placeholder="예: 주니네 가족"
+                  maxLength={40}
+                  autoComplete="organization"
                   className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
                 />
               </div>
               <div>
-                <label className="text-xs font-bold text-[#8B7088]">내 이름</label>
+                <label htmlFor="owner-name" className="text-xs font-bold text-[#8B7088]">내 이름</label>
                 <input
+                  id="owner-name"
                   value={yourNameInput}
                   onChange={(event) => setYourNameInput(event.target.value)}
+                  maxLength={20}
+                  autoComplete="name"
                   className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
                 />
               </div>
@@ -530,7 +598,7 @@ export default function Page() {
                 <div>
                   <label className="text-xs font-bold text-[#8B7088]">시작할 책</label>
                   <select
-                    value={startBookIdInput}
+                    value={effectiveStartBookId}
                     onChange={(event) => setStartBookIdInput(event.target.value)}
                     className="mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-3 py-3 text-sm"
                   >
@@ -554,30 +622,33 @@ export default function Page() {
                 </div>
               )}
               <div>
-                <label className="text-xs font-bold text-[#8B7088]">내 비밀번호 (4~8자)</label>
+                <label htmlFor="owner-pin" className="text-xs font-bold text-[#8B7088]">내 비밀번호 (4~8자)</label>
                 <input
+                  id="owner-pin"
                   value={pin}
                   onChange={(event) => setPin(event.target.value)}
                   className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
                   inputMode="numeric"
                   type="password"
+                  maxLength={8}
+                  autoComplete="new-password"
                 />
               </div>
               <button
+                type="submit"
                 disabled={
                   authPending ||
                   !groupNameInput.trim() ||
                   !yourNameInput.trim() ||
                   pin.length < 4 ||
-                  (readingModeInput === "daily_one" && !startBookIdInput)
+                  (readingModeInput === "daily_one" && !effectiveStartBookId)
                 }
-                onClick={() => void createGroup()}
                 className="w-full rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-60"
                 style={{ background: "#A93F62" }}
               >
                 {authPending ? "만드는 중" : "그룹 만들기"}
               </button>
-            </div>
+            </form>
           </div>
         )}
 
@@ -619,30 +690,36 @@ export default function Page() {
             )}
 
             {selectedSlug && (
-              <div className="card mt-2 rounded-2xl p-4">
-                <label className="text-xs font-bold text-[#8B7088]">비밀번호</label>
+              <form
+                className="card mt-2 rounded-2xl p-4"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void login(lookup.groupId, selectedSlug);
+                }}
+              >
+                <label htmlFor="login-pin" className="text-xs font-bold text-[#8B7088]">비밀번호</label>
                 <div className="mt-2 flex gap-2">
                   <input
+                    id="login-pin"
                     value={pin}
                     onChange={(event) => setPin(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") void login(lookup.groupId, selectedSlug);
-                    }}
                     className="focus-ring min-w-0 flex-1 rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
                     inputMode="numeric"
                     type="password"
+                    maxLength={8}
+                    autoComplete="current-password"
                     autoFocus
                   />
                   <button
-                    disabled={loginPending}
-                    onClick={() => void login(lookup.groupId, selectedSlug)}
+                    type="submit"
+                    disabled={loginPending || pin.length < 4}
                     className="focus-ring inline-flex min-w-[72px] items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-80"
-                    style={{ background: lookup.profiles.find((person) => person.slug === selectedSlug)?.accent_color ?? "#A93F62" }}
+                    style={{ background: lookup.profiles.find((person) => person.slug === selectedSlug)?.accent_deep ?? "#A93F62" }}
                   >
                     {loginPending ? "확인 중" : "확인"}
                   </button>
                 </div>
-              </div>
+              </form>
             )}
           </div>
         )}
@@ -650,40 +727,52 @@ export default function Page() {
         {authMode === "join-group" && lookup && (
           <div className="space-y-3">
             <BackButton onClick={() => setAuthMode("pick-profile")} />
-            <div className="card space-y-3 rounded-2xl p-4">
+            <form
+              className="card space-y-3 rounded-2xl p-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void joinGroup();
+              }}
+            >
               <p className="text-sm font-bold">{lookup.groupName}에 참여해요</p>
               <div>
-                <label className="text-xs font-bold text-[#8B7088]">내 이름</label>
+                <label htmlFor="member-name" className="text-xs font-bold text-[#8B7088]">내 이름</label>
                 <input
+                  id="member-name"
                   value={yourNameInput}
                   onChange={(event) => setYourNameInput(event.target.value)}
+                  maxLength={20}
+                  autoComplete="name"
                   className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
                 />
               </div>
               <ColorPicker value={colorKeyInput} onChange={setColorKeyInput} usedColorKeys={lookup.profiles.map((p) => p.color_key)} />
               <div>
-                <label className="text-xs font-bold text-[#8B7088]">내 비밀번호 (4~8자)</label>
+                <label htmlFor="member-pin" className="text-xs font-bold text-[#8B7088]">내 비밀번호 (4~8자)</label>
                 <input
+                  id="member-pin"
                   value={pin}
                   onChange={(event) => setPin(event.target.value)}
                   className="focus-ring mt-2 w-full rounded-xl border border-[#F2DCE5] bg-white px-4 py-3 text-base"
                   inputMode="numeric"
                   type="password"
+                  maxLength={8}
+                  autoComplete="new-password"
                 />
               </div>
               <button
+                type="submit"
                 disabled={authPending || !yourNameInput.trim() || pin.length < 4}
-                onClick={() => void joinGroup()}
                 className="w-full rounded-xl px-4 py-3 text-sm font-bold text-white disabled:cursor-default disabled:opacity-60"
                 style={{ background: "#5F6F3E" }}
               >
                 {authPending ? "참여하는 중" : "참여하기"}
               </button>
-            </div>
+            </form>
           </div>
         )}
 
-        {error && <p className="mt-4 text-center text-sm text-[#A93F62]">{error}</p>}
+        {error && <p className="mt-4 text-center text-sm text-[#A93F62]" role="alert">{error}</p>}
       </main>
     );
   }
@@ -691,7 +780,7 @@ export default function Page() {
   const appState = state as AppState;
 
   return (
-    <main className="relative z-10 mx-auto flex min-h-screen max-w-6xl flex-col px-4 pb-24 pt-5 md:px-6">
+    <main className="app-main relative z-10 mx-auto flex min-h-screen max-w-6xl flex-col px-4 pt-5 md:px-6" aria-busy={pendingActions > 0}>
       <header className="mb-5 flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2 text-xs font-bold" style={{ color: me.accent_color }}>
@@ -708,20 +797,20 @@ export default function Page() {
             <Bell size={18} />
             {unreadCount > 0 && <Badge>{unreadCount}</Badge>}
           </IconButton>
-          <button onClick={() => void logout()} className="rounded-full px-3 py-2 text-xs text-[#8B7088] hover:bg-white/60">
-            나가기
-          </button>
         </div>
       </header>
 
       {error && (
-        <div className="mb-4 rounded-2xl border border-[#F4B5C9] bg-white px-4 py-3 text-sm text-[#A93F62]">
-          {error}
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-2xl border border-[#F4B5C9] bg-white px-4 py-3 text-sm text-[#A93F62]" role="alert">
+          <span>{error}</span>
+          <button type="button" onClick={() => { setError(""); void fetchState().catch((err) => setError(err instanceof Error ? err.message : "다시 불러오지 못했어요")); }} className="shrink-0 rounded-lg bg-[#FCE4EC] px-3 py-2 text-xs font-bold">
+            다시 불러오기
+          </button>
         </div>
       )}
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <section className="min-w-0">
+        <section className="view-enter min-w-0" key={tab}>
           {tab === "today" && currentSegment && (
             <TodayView
               state={appState}
@@ -731,48 +820,51 @@ export default function Page() {
               book={currentBook}
               onRead={(segmentIds) => checkReadOptimistically(segmentIds)}
               onOpenSegment={(id) => {
-                setSelectedSegmentId(id);
-                setTab("reading");
+                openSegment(id, "reading");
               }}
               action={refreshAfterSilently}
               proposalAction={refreshAfter}
             />
+          )}
+          {tab === "today" && !currentSegment && (
+            <EmptyState title="오늘 읽을 범위를 준비하지 못했어요" body="잠시 후 다시 불러오거나 그룹 정보를 확인해 주세요." />
           )}
           {tab === "reading" && activeSegment && (
             <ReadingView
               state={appState}
               me={me}
               activeSegment={activeSegment}
-              selectedBookId={selectedBookId}
+              selectedBookId={effectiveSelectedBookId}
               setSelectedBookId={setSelectedBookId}
               setSelectedSegmentId={setSelectedSegmentId}
               action={refreshAfterSilently}
               proposalAction={refreshAfter}
             />
           )}
+          {tab === "reading" && !activeSegment && (
+            <EmptyState title="코멘트할 장이 아직 없어요" body="오늘 읽을 범위가 열리면 여기에서 생각을 나눌 수 있어요." />
+          )}
           {tab === "records" && (
             <RecordsView
               state={appState}
-              selectedBookId={selectedBookId}
+              selectedBookId={effectiveSelectedBookId}
               setSelectedBookId={setSelectedBookId}
               selectedSegmentId={selectedSegmentId}
               setSelectedSegmentId={setSelectedSegmentId}
-              me={me}
-              action={refreshAfterSilently}
             />
           )}
         </section>
 
         <aside className="hidden lg:block">
-          {appState.readingMode !== "plan" && <NextBookCard state={appState} me={me} action={refreshAfter} />}
+          {appState.readingMode !== "plan" && <NextBookCard key={appState.nextBook?.bookId ?? "next-book"} state={appState} me={me} action={refreshAfter} />}
         </aside>
       </div>
 
-      <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-[#F2DCE5] bg-[#FFF8F1]/95 px-3 py-2 backdrop-blur">
+      <nav className="bottom-nav fixed inset-x-0 bottom-0 z-30 border-t border-[#F2DCE5] bg-[#FFF8F1]/95 px-3 backdrop-blur" aria-label="주요 메뉴">
         <div className="mx-auto grid max-w-[400px] grid-cols-3 gap-2">
-          <TabButton active={tab === "today"} icon={<Home size={18} />} label="오늘" onClick={() => setTab("today")} />
-          <TabButton active={tab === "reading"} icon={<BookOpen size={18} />} label="코멘트" onClick={() => setTab("reading")} />
-          <TabButton active={tab === "records"} icon={<Library size={18} />} label="기록" onClick={() => setTab("records")} />
+          <TabButton active={tab === "today"} icon={<Home size={18} />} label="오늘" onClick={() => changeTab("today")} />
+          <TabButton active={tab === "reading"} icon={<BookOpen size={18} />} label="코멘트" onClick={() => changeTab("reading")} />
+          <TabButton active={tab === "records"} icon={<Library size={18} />} label="기록" onClick={() => changeTab("records")} />
         </div>
       </nav>
 
@@ -783,8 +875,7 @@ export default function Page() {
             action={refreshAfterSilently}
             onNavigate={(targetType, targetId) => {
               if (targetType === "segment" && targetId) {
-                setSelectedSegmentId(targetId);
-                setTab("records");
+                openSegment(targetId, "records");
               }
               setNotificationsOpen(false);
             }}
@@ -794,12 +885,19 @@ export default function Page() {
 
       {groupInfoOpen && (
         <Drawer title="그룹 정보" onClose={() => setGroupInfoOpen(false)}>
-          <GroupInfoView state={appState} me={me} action={refreshAfterSilently} />
+          <GroupInfoView state={appState} me={me} action={refreshAfterSilently} onLogout={() => { setGroupInfoOpen(false); void logout(); }} />
         </Drawer>
       )}
-      <div className="fixed bottom-[78px] right-4 z-20 rounded-full bg-white/80 px-3 py-1 text-[11px] text-[#8B7088] shadow-sm">
-        Realtime {realtimeStatus === "SUBSCRIBED" ? "연결됨" : "연결 중"}
-      </div>
+      {pendingActions > 0 && (
+        <div className="save-status fixed right-4 z-20 inline-flex items-center gap-2 rounded-full bg-white/95 px-3 py-2 text-xs font-bold text-[#8B7088] shadow-lg" role="status" aria-live="polite">
+          <LoaderCircle className="animate-spin" size={14} aria-hidden="true" /> 저장하고 있어요
+        </div>
+      )}
+      {pendingActions === 0 && ["CHANNEL_ERROR", "TIMED_OUT"].includes(realtimeStatus) && (
+        <button type="button" onClick={() => void fetchState()} className="save-status fixed right-4 z-20 rounded-full bg-white/95 px-3 py-2 text-xs font-bold text-[#A93F62] shadow-lg">
+          연결이 불안정해요 · 새로고침
+        </button>
+      )}
     </main>
   );
 }
@@ -836,9 +934,10 @@ function MissScoreboard({ state, me, others }: { state: AppState; me: Profile; o
   );
 }
 
-function GiftSetupCard({ state, me, action }: { state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void> }) {
+function GiftSetupCard({ state, me, action }: { state: AppState; me: Profile; action: ActionRunner }) {
   const [giftText, setGiftText] = useState("");
   const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const myGift: BookGift | null = state.myGift ?? null;
   const partnerHasGift: boolean = state.partnerHasGift ?? false;
@@ -865,7 +964,7 @@ function GiftSetupCard({ state, me, action }: { state: AppState; me: Profile; ac
         <p className="text-sm font-black">선물 설정 🎁</p>
         <p className="mt-1 text-xs text-[#8B7088]">이번 책에서 지면 줄 선물을 몰래 정해봐요. 다른 멤버들은 책이 끝날 때까지 못 봐요.</p>
         {partnerHasGift && <p className="mt-2 text-xs text-[#A93F62]">누군가 이미 선물을 설정했어요 🤫</p>}
-        <button onClick={() => setEditing(true)} className="mt-3 rounded-xl px-4 py-2 text-sm font-bold text-white" style={{ background: me.accent_color }}>
+        <button onClick={() => setEditing(true)} className="mt-3 rounded-xl px-4 py-2 text-sm font-bold text-white" style={{ background: me.accent_deep }}>
           선물 정하기
         </button>
       </div>
@@ -884,19 +983,24 @@ function GiftSetupCard({ state, me, action }: { state: AppState; me: Profile; ac
       />
       <div className="mt-2 flex gap-2">
         <button
-          onClick={() => {
+          disabled={saving || !giftText.trim()}
+          onClick={async () => {
             const giftDescription = giftText.trim();
             if (!giftDescription) return;
-            setEditing(false);
-            setGiftText("");
-            void action(() => apiAction("set_gift", { giftDescription }));
+            setSaving(true);
+            const saved = await action(() => apiAction("set_gift", { giftDescription }));
+            setSaving(false);
+            if (saved) {
+              setEditing(false);
+              setGiftText("");
+            }
           }}
-          className="rounded-xl px-4 py-2 text-sm font-bold text-white"
-          style={{ background: me.accent_color }}
+          className="rounded-xl px-4 py-2 text-sm font-bold text-white disabled:cursor-default disabled:opacity-60"
+          style={{ background: me.accent_deep }}
         >
-          저장
+          {saving ? "저장 중" : "저장"}
         </button>
-        <button onClick={() => { setEditing(false); setGiftText(""); }} className="rounded-xl px-4 py-2 text-sm text-[#8B7088]">취소</button>
+        <button disabled={saving} onClick={() => { setEditing(false); setGiftText(""); }} className="rounded-xl px-4 py-2 text-sm text-[#8B7088] disabled:opacity-50">취소</button>
       </div>
     </div>
   );
@@ -945,8 +1049,8 @@ function TodayView({
   book: Book | null;
   onRead: (segmentIds: string[]) => void;
   onOpenSegment: (id: string) => void;
-  action: (fn: () => Promise<unknown>) => Promise<void>;
-  proposalAction: (fn: () => Promise<unknown>) => Promise<void>;
+  action: ActionRunner;
+  proposalAction: ActionRunner;
 }) {
   const isPlanMode = state.readingMode === "plan" && Boolean(state.planDay);
   const todaySegments = isPlanMode
@@ -975,7 +1079,7 @@ function TodayView({
 
       <div className="card rounded-3xl p-6">
         <p className="text-sm text-[#8B7088]">오늘은</p>
-        <h2 className="mt-2 text-4xl font-black">
+        <h2 className="mt-2 text-3xl font-black leading-tight sm:text-4xl">
           {isPlanMode ? (
             <span style={{ color: me.accent_color }}>{formatPlanRange(todaySegments)}</span>
           ) : (
@@ -997,7 +1101,7 @@ function TodayView({
             target="_blank"
             rel="noreferrer"
             className="rounded-2xl px-4 py-4 text-center text-sm font-bold text-white"
-            style={{ background: me.accent_color }}
+            style={{ background: me.accent_deep }}
           >
             연구용 본문 보기
           </a>
@@ -1048,7 +1152,7 @@ function TodayView({
 
       {!isPlanMode && (
         <div className="lg:hidden">
-          <NextBookCard state={state} me={me} action={proposalAction} />
+          <NextBookCard key={state.nextBook?.bookId ?? "next-book-mobile"} state={state} me={me} action={proposalAction} />
         </div>
       )}
       {isPlanMode
@@ -1074,28 +1178,44 @@ function ReadingView({
   selectedBookId: string;
   setSelectedBookId: (id: string) => void;
   setSelectedSegmentId: (id: string) => void;
-  action: (fn: () => Promise<unknown>) => Promise<void>;
-  proposalAction: (fn: () => Promise<unknown>) => Promise<void>;
+  action: ActionRunner;
+  proposalAction: ActionRunner;
 }) {
   const selectedBook = state.books.find((book) => book.id === selectedBookId) ?? state.books.find((book) => book.id === activeSegment.book_id);
   const bookSegments = state.segments.filter((segment) => segment.book_id === selectedBook?.id);
+  const visibleSegment = bookSegments.find((segment) => segment.id === activeSegment.id) ?? bookSegments[0] ?? activeSegment;
+
+  function selectBook(bookId: string) {
+    setSelectedBookId(bookId);
+    const firstSegment = state.segments.find((segment) => segment.book_id === bookId);
+    if (firstSegment) setSelectedSegmentId(firstSegment.id);
+  }
 
   return (
     <div className="grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)]">
       <div className="card rounded-3xl p-4">
-          <h2 className="mb-3 text-lg font-black">코멘트할 장</h2>
-        <div className="max-h-[360px] space-y-2 overflow-auto pr-1">
+        <h2 className="mb-3 text-lg font-black">코멘트할 책</h2>
+        <label htmlFor="comment-book" className="sr-only">코멘트할 책 선택</label>
+        <select
+          id="comment-book"
+          value={selectedBook?.id ?? ""}
+          onChange={(event) => selectBook(event.target.value)}
+          className="focus-ring w-full rounded-xl border border-[#F2DCE5] bg-white px-3 py-3 text-sm xl:hidden"
+        >
+          {state.books.map((book) => <option key={book.id} value={book.id}>{book.name}</option>)}
+        </select>
+        <div className="hidden max-h-[360px] space-y-2 overflow-auto pr-1 xl:block">
           {state.books.map((book) => (
             <button
               key={book.id}
-              onClick={() => setSelectedBookId(book.id)}
+              onClick={() => selectBook(book.id)}
               className={`w-full rounded-2xl px-3 py-2 text-left text-sm ${selectedBook?.id === book.id ? "bg-[#FCE4EC] font-bold text-[#A93F62]" : "hover:bg-white"}`}
             >
               {book.name}
             </button>
           ))}
         </div>
-        {state.readingMode !== "plan" && <NextBookCard state={state} me={me} action={proposalAction} compact />}
+        {state.readingMode !== "plan" && <NextBookCard key={state.nextBook?.bookId ?? "next-book-compact"} state={state} me={me} action={proposalAction} compact />}
       </div>
 
       <div className="space-y-5">
@@ -1103,8 +1223,8 @@ function ReadingView({
           <h2 className="mb-3 text-lg font-black">{selectedBook?.name ?? "책"} 코멘트</h2>
           <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8">
             {bookSegments.map((segment) => {
-              const done = state.readingStates.some((item) => item.segment_id === segment.id);
-              const active = activeSegment.id === segment.id;
+              const done = state.readingStates.some((item) => item.segment_id === segment.id && item.profile_id === me.id);
+              const active = visibleSegment.id === segment.id;
               return (
                 <button
                   key={segment.id}
@@ -1117,7 +1237,7 @@ function ReadingView({
             })}
           </div>
         </div>
-        <SegmentDetail state={state} me={me} segment={activeSegment} action={action} />
+        <SegmentDetail key={visibleSegment.id} state={state} me={me} segment={visibleSegment} action={action} />
       </div>
     </div>
   );
@@ -1132,7 +1252,7 @@ function SegmentDetail({
   state: AppState;
   me: Profile;
   segment: Segment;
-  action: (fn: () => Promise<unknown>) => Promise<void>;
+  action: ActionRunner;
 }) {
   const [comment, setComment] = useState("");
   const [note, setNote] = useState("");
@@ -1140,6 +1260,8 @@ function SegmentDetail({
   const [startVerse, setStartVerse] = useState<number | null>(null);
   const [endVerse, setEndVerse] = useState<number | null>(null);
   const [color, setColor] = useState(HIGHLIGHT_COLORS[0]);
+  const [commentPending, setCommentPending] = useState(false);
+  const [highlightPending, setHighlightPending] = useState(false);
   const verseCount = state.verseCounts.find((item) => item.book_id === segment.book_id && item.chapter === segment.chapter)?.verse_count ?? null;
   const comments = state.comments.filter((item) => item.segment_id === segment.id);
   const highlights = state.highlights.filter((item) => item.segment_id === segment.id);
@@ -1182,18 +1304,21 @@ function SegmentDetail({
             className="min-h-28 w-full rounded-2xl border border-[#F2DCE5] px-4 py-3"
           />
           <button
-            onClick={() => {
+            disabled={commentPending || !comment.trim()}
+            onClick={async () => {
               const body = comment.trim();
               if (!body) return;
-              setComment("");
-              void action(async () => {
+              setCommentPending(true);
+              const saved = await action(async () => {
                 await apiAction("add_comment", { segmentId: segment.id, body });
               });
+              setCommentPending(false);
+              if (saved) setComment("");
             }}
-            className="mt-3 rounded-xl px-4 py-2 text-sm font-bold text-white"
-            style={{ background: me.accent_color }}
+            className="mt-3 rounded-xl px-4 py-2 text-sm font-bold text-white disabled:cursor-default disabled:opacity-60"
+            style={{ background: me.accent_deep }}
           >
-            코멘트 남기기
+            {commentPending ? "남기는 중" : "코멘트 남기기"}
           </button>
         </div>
 
@@ -1208,7 +1333,7 @@ function SegmentDetail({
                     key={verse}
                     onClick={() => toggleVerse(verse)}
                     className={`rounded-xl px-2 py-2 text-sm ${selected ? "font-bold text-white" : "bg-white text-[#8B7088]"}`}
-                    style={selected ? { background: me.accent_color } : undefined}
+                    style={selected ? { background: me.accent_deep } : undefined}
                   >
                     {verse}
                   </button>
@@ -1242,7 +1367,8 @@ function SegmentDetail({
             className="mb-3 min-h-20 w-full rounded-xl border border-[#F2DCE5] px-3 py-2"
           />
           <button
-            onClick={() => {
+            disabled={highlightPending || !selectedVerseRef}
+            onClick={async () => {
               if (!selectedVerseRef) return;
               const nextHighlight = {
                 segmentId: segment.id,
@@ -1252,11 +1378,8 @@ function SegmentDetail({
                 note,
                 color,
               };
-              setNote("");
-              setStartVerse(null);
-              setEndVerse(null);
-              setManualVerse("");
-              void action(async () => {
+              setHighlightPending(true);
+              const saved = await action(async () => {
                 await apiAction("add_highlight", {
                   segmentId: nextHighlight.segmentId,
                   verseRef: nextHighlight.verseRef,
@@ -1266,11 +1389,18 @@ function SegmentDetail({
                   color: nextHighlight.color,
                 });
               });
+              setHighlightPending(false);
+              if (saved) {
+                setNote("");
+                setStartVerse(null);
+                setEndVerse(null);
+                setManualVerse("");
+              }
             }}
-            className="rounded-xl px-4 py-2 text-sm font-bold text-white"
-            style={{ background: me.accent_color }}
+            className="rounded-xl px-4 py-2 text-sm font-bold text-white disabled:cursor-default disabled:opacity-60"
+            style={{ background: me.accent_deep }}
           >
-            구절 남기기
+            {highlightPending ? "남기는 중" : "구절 남기기"}
           </button>
         </div>
       </div>
@@ -1290,7 +1420,7 @@ function SegmentDetail({
   );
 }
 
-function HighlightCard({ highlight, state, me, action }: { highlight: Highlight; state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void> }) {
+function HighlightCard({ highlight, state, me, action }: { highlight: Highlight; state: AppState; me: Profile; action: ActionRunner }) {
   const author = state.profiles.find((profile) => profile.id === highlight.profile_id);
   const replies = state.replies.filter((reply) => reply.parent_type === "highlight" && reply.parent_id === highlight.id);
   const reactions = state.reactions.filter((reaction) => reaction.target_type === "highlight" && reaction.target_id === highlight.id);
@@ -1316,7 +1446,7 @@ function HighlightCard({ highlight, state, me, action }: { highlight: Highlight;
   );
 }
 
-function CommentCard({ comment, state, me, action }: { comment: SegmentComment; state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void> }) {
+function CommentCard({ comment, state, me, action }: { comment: SegmentComment; state: AppState; me: Profile; action: ActionRunner }) {
   const author = state.profiles.find((profile) => profile.id === comment.profile_id);
   const replies = state.replies.filter((reply) => reply.parent_type === "comment" && reply.parent_id === comment.id);
   const reactions = state.reactions.filter((reaction) => reaction.target_type === "comment" && reaction.target_id === comment.id);
@@ -1370,26 +1500,27 @@ function EntryCard({
   reacted: boolean;
   state: AppState;
   me: Profile;
-  onReact: () => void;
-  onReply: (body: string) => void;
+  onReact: () => Promise<boolean>;
+  onReply: (body: string) => Promise<boolean>;
   onEdit: () => void;
   onDelete: () => void;
-  action: (fn: () => Promise<unknown>) => Promise<void>;
+  action: ActionRunner;
 }) {
   const [reply, setReply] = useState("");
-  const [localReacted, setLocalReacted] = useState(reacted);
-  const [localReactions, setLocalReactions] = useState(reactions);
+  const [optimisticReacted, setOptimisticReacted] = useState<boolean | null>(null);
+  const [reactionPending, setReactionPending] = useState(false);
+  const [replyPending, setReplyPending] = useState(false);
+  const localReacted = optimisticReacted ?? reacted;
+  const localReactions = reactions + (optimisticReacted === null || optimisticReacted === reacted ? 0 : optimisticReacted ? 1 : -1);
 
-  useEffect(() => {
-    setLocalReacted(reacted);
-    setLocalReactions(reactions);
-  }, [reacted, reactions]);
-
-  function toggleLocalReaction() {
+  async function toggleLocalReaction() {
+    if (reactionPending) return;
     const nextReacted = !localReacted;
-    setLocalReacted(nextReacted);
-    setLocalReactions((current) => Math.max(0, current + (nextReacted ? 1 : -1)));
-    onReact();
+    setOptimisticReacted(nextReacted);
+    setReactionPending(true);
+    const saved = await onReact();
+    setReactionPending(false);
+    if (!saved) setOptimisticReacted(null);
   }
 
   return (
@@ -1414,8 +1545,8 @@ function EntryCard({
       </div>
       <p className="whitespace-pre-wrap text-sm leading-6">{body}</p>
       <div className="mt-4 flex items-center gap-2">
-        <button onClick={toggleLocalReaction} className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs ${localReacted ? "bg-[#FCE4EC] text-[#A93F62]" : "bg-white text-[#8B7088]"}`}>
-          <Heart size={14} /> {localReactions}
+        <button disabled={reactionPending} onClick={() => void toggleLocalReaction()} aria-pressed={localReacted} className={`inline-flex min-h-9 items-center gap-1 rounded-full px-3 py-1.5 text-xs disabled:opacity-60 ${localReacted ? "bg-[#FCE4EC] text-[#A93F62]" : "bg-white text-[#8B7088]"}`}>
+          <Heart size={14} /> {Math.max(0, localReactions)}
         </button>
       </div>
       {replies.length > 0 && (
@@ -1445,20 +1576,29 @@ function EntryCard({
           })}
         </div>
       )}
-      <div className="mt-3 flex gap-2">
-        <input value={reply} onChange={(event) => setReply(event.target.value)} placeholder="답글" className="min-w-0 flex-1 rounded-xl border border-[#F2DCE5] px-3 py-2 text-sm" />
+      <form
+        className="mt-3 flex gap-2"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          const body = reply.trim();
+          if (!body || replyPending) return;
+          setReplyPending(true);
+          const saved = await onReply(body);
+          setReplyPending(false);
+          if (saved) setReply("");
+        }}
+      >
+        <label className="sr-only" htmlFor={`reply-${title}-${createdAt}`}>답글</label>
+        <input id={`reply-${title}-${createdAt}`} value={reply} onChange={(event) => setReply(event.target.value)} placeholder="답글을 남겨요" className="focus-ring min-w-0 flex-1 rounded-xl border border-[#F2DCE5] px-3 py-2 text-sm" />
         <button
-          onClick={() => {
-            if (!reply.trim()) return;
-            onReply(reply);
-            setReply("");
-          }}
-          className="rounded-xl px-3 py-2 text-sm font-bold text-white"
-          style={{ background: me.accent_color }}
+          type="submit"
+          disabled={replyPending || !reply.trim()}
+          className="rounded-xl px-3 py-2 text-sm font-bold text-white disabled:cursor-default disabled:opacity-60"
+          style={{ background: me.accent_deep }}
         >
-          남기기
+          {replyPending ? "저장 중" : "남기기"}
         </button>
-      </div>
+      </form>
     </div>
   );
 }
@@ -1469,30 +1609,42 @@ function RecordsView({
   setSelectedBookId,
   selectedSegmentId,
   setSelectedSegmentId,
-  me,
-  action,
 }: {
   state: AppState;
   selectedBookId: string;
   setSelectedBookId: (id: string) => void;
   selectedSegmentId: string | null;
   setSelectedSegmentId: (id: string) => void;
-  me: Profile;
-  action: (fn: () => Promise<unknown>) => Promise<void>;
 }) {
   const selectedBook = state.books.find((book) => book.id === selectedBookId) ?? state.books[0];
   const bookSegments = state.segments.filter((segment) => segment.book_id === selectedBook?.id);
   const selectedSegment = state.segments.find((segment) => segment.id === selectedSegmentId) ?? bookSegments[0] ?? state.segments[0];
+
+  function selectBook(bookId: string) {
+    setSelectedBookId(bookId);
+    const firstSegment = state.segments.find((segment) => segment.book_id === bookId);
+    if (firstSegment) setSelectedSegmentId(firstSegment.id);
+  }
+
   return (
     <div className="grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)]">
       <div className="card rounded-3xl p-4">
         <h2 className="mb-3 text-lg font-black">기록</h2>
-        <div className="max-h-[420px] space-y-2 overflow-auto pr-1">
+        <label htmlFor="record-book" className="sr-only">기록을 볼 책 선택</label>
+        <select
+          id="record-book"
+          value={selectedBook?.id ?? ""}
+          onChange={(event) => selectBook(event.target.value)}
+          className="focus-ring w-full rounded-xl border border-[#F2DCE5] bg-white px-3 py-3 text-sm xl:hidden"
+        >
+          {state.books.map((book) => <option key={book.id} value={book.id}>{book.name}</option>)}
+        </select>
+        <div className="hidden max-h-[420px] space-y-2 overflow-auto pr-1 xl:block">
           {state.books.map((book) => {
             const segments = state.segments.filter((segment) => segment.book_id === book.id);
             const read = segments.filter((segment) => state.readingStates.some((item) => item.segment_id === segment.id)).length;
             return (
-              <button key={book.id} onClick={() => setSelectedBookId(book.id)} className={`w-full rounded-2xl px-3 py-2 text-left text-sm ${selectedBook?.id === book.id ? "bg-[#FCE4EC] font-bold text-[#A93F62]" : "hover:bg-white"}`}>
+              <button key={book.id} onClick={() => selectBook(book.id)} className={`w-full rounded-2xl px-3 py-2 text-left text-sm ${selectedBook?.id === book.id ? "bg-[#FCE4EC] font-bold text-[#A93F62]" : "hover:bg-white"}`}>
                 <span className="block">{book.name}</span>
                 <span className="text-xs text-[#A89AA0]">{read}/{book.chapter_count}장</span>
               </button>
@@ -1514,13 +1666,13 @@ function RecordsView({
             })}
           </div>
         </div>
-        {selectedSegment && <RecordDetail state={state} segment={selectedSegment} me={me} action={action} />}
+        {selectedSegment && <RecordDetail state={state} segment={selectedSegment} />}
       </div>
     </div>
   );
 }
 
-function RecordDetail({ state, segment, me, action }: { state: AppState; segment: Segment; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void> }) {
+function RecordDetail({ state, segment }: { state: AppState; segment: Segment }) {
   const readStates = state.readingStates.filter((item) => item.segment_id === segment.id);
   return (
     <div className="space-y-5">
@@ -1658,17 +1810,13 @@ function getBookIdsWithReadingRecord(state: AppState) {
   return bookIds;
 }
 
-function NextBookCard({ state, me, action, compact }: { state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void>; compact?: boolean }) {
+function NextBookCard({ state, me, action, compact }: { state: AppState; me: Profile; action: ActionRunner; compact?: boolean }) {
   const readBookIds = useMemo(() => getBookIdsWithReadingRecord(state), [state]);
   const nextBook = state.nextBook;
   const nextBookInfo = state.books.find((book) => book.id === nextBook?.bookId);
   const [editing, setEditing] = useState(false);
   const [bookId, setBookId] = useState(nextBook?.bookId ?? "");
-
-  useEffect(() => {
-    setEditing(false);
-    setBookId(nextBook?.bookId ?? "");
-  }, [nextBook?.bookId]);
+  const [saving, setSaving] = useState(false);
 
   if (!nextBook) return null;
 
@@ -1677,10 +1825,12 @@ function NextBookCard({ state, me, action, compact }: { state: AppState; me: Pro
     setEditing(true);
   };
 
-  const submit = () => {
+  const submit = async () => {
     if (!bookId) return;
-    setEditing(false);
-    void action(() => apiAction("set_next_book", { bookId }));
+    setSaving(true);
+    const saved = await action(() => apiAction("set_next_book", { bookId }));
+    setSaving(false);
+    if (saved) setEditing(false);
   };
 
   return (
@@ -1707,13 +1857,14 @@ function NextBookCard({ state, me, action, compact }: { state: AppState; me: Pro
           </select>
           <div className="flex gap-2">
             <button
-              onClick={submit}
+              disabled={saving || !bookId}
+              onClick={() => void submit()}
               className="flex-1 rounded-xl px-3 py-2 text-sm font-bold text-white disabled:cursor-default disabled:opacity-50"
-              style={{ background: me.accent_color }}
+              style={{ background: me.accent_deep }}
             >
-              정하기
+              {saving ? "저장 중" : "정하기"}
             </button>
-            <button onClick={() => setEditing(false)} className="rounded-xl bg-white px-3 py-2 text-sm text-[#8B7088]">취소</button>
+            <button disabled={saving} onClick={() => setEditing(false)} className="rounded-xl bg-white px-3 py-2 text-sm text-[#8B7088] disabled:opacity-50">취소</button>
           </div>
         </div>
       )}
@@ -1721,7 +1872,7 @@ function NextBookCard({ state, me, action, compact }: { state: AppState; me: Pro
   );
 }
 
-function NotificationsView({ state, action, onNavigate }: { state: AppState; action: (fn: () => Promise<unknown>) => Promise<void>; onNavigate: (targetType: string | null, targetId: string | null) => void }) {
+function NotificationsView({ state, action, onNavigate }: { state: AppState; action: ActionRunner; onNavigate: (targetType: string | null, targetId: string | null) => void }) {
   const notifications = state.notifications.filter((item) => !item.read_at);
   return (
     <div className="space-y-3">
@@ -1751,12 +1902,14 @@ function NotificationsView({ state, action, onNavigate }: { state: AppState; act
   );
 }
 
-function GroupInfoView({ state, me, action }: { state: AppState; me: Profile; action: (fn: () => Promise<unknown>) => Promise<void> }) {
+function GroupInfoView({ state, me, action, onLogout }: { state: AppState; me: Profile; action: ActionRunner; onLogout: () => void }) {
   const [copied, setCopied] = useState(false);
   const [editingGroupName, setEditingGroupName] = useState(false);
   const [groupNameDraft, setGroupNameDraft] = useState(state.groupName);
   const [editingMyName, setEditingMyName] = useState(false);
   const [myNameDraft, setMyNameDraft] = useState(me.display_name);
+  const [groupNamePending, setGroupNamePending] = useState(false);
+  const [myNamePending, setMyNamePending] = useState(false);
 
   return (
     <div className="space-y-4">
@@ -1771,16 +1924,19 @@ function GroupInfoView({ state, me, action }: { state: AppState; me: Profile; ac
               autoFocus
             />
             <button
-              onClick={() => {
+              disabled={groupNamePending || !groupNameDraft.trim()}
+              onClick={async () => {
                 const name = groupNameDraft.trim();
                 if (!name) return;
-                setEditingGroupName(false);
-                void action(() => apiAction("update_group_name", { groupName: name }));
+                setGroupNamePending(true);
+                const saved = await action(() => apiAction("update_group_name", { groupName: name }));
+                setGroupNamePending(false);
+                if (saved) setEditingGroupName(false);
               }}
-              className="rounded-xl px-3 py-2 text-sm font-bold text-white"
-              style={{ background: me.accent_color }}
+              className="rounded-xl px-3 py-2 text-sm font-bold text-white disabled:opacity-60"
+              style={{ background: me.accent_deep }}
             >
-              저장
+              {groupNamePending ? "저장 중" : "저장"}
             </button>
           </div>
         ) : (
@@ -1807,9 +1963,12 @@ function GroupInfoView({ state, me, action }: { state: AppState; me: Profile; ac
         <p className="mt-2 text-3xl font-black tracking-[0.2em]">{state.inviteCode}</p>
         <button
           onClick={() => {
-            void navigator.clipboard?.writeText(state.inviteCode);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
+            void copyText(state.inviteCode)
+              .then(() => {
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1500);
+              })
+              .catch(() => setCopied(false));
           }}
           className="mt-4 inline-flex items-center gap-1 rounded-xl bg-white px-4 py-2 text-sm font-bold text-[#8B7088]"
         >
@@ -1841,16 +2000,19 @@ function GroupInfoView({ state, me, action }: { state: AppState; me: Profile; ac
               {profile.id === me.id && (
                 editingMyName ? (
                   <button
-                    onClick={() => {
+                    disabled={myNamePending || !myNameDraft.trim()}
+                    onClick={async () => {
                       const name = myNameDraft.trim();
                       if (!name) return;
-                      setEditingMyName(false);
-                      void action(() => apiAction("update_my_name", { displayName: name }));
+                      setMyNamePending(true);
+                      const saved = await action(() => apiAction("update_my_name", { displayName: name }));
+                      setMyNamePending(false);
+                      if (saved) setEditingMyName(false);
                     }}
-                    className="rounded-xl px-3 py-1 text-xs font-bold text-white"
-                    style={{ background: me.accent_color }}
+                    className="rounded-xl px-3 py-1 text-xs font-bold text-white disabled:opacity-60"
+                    style={{ background: me.accent_deep }}
                   >
-                    저장
+                    {myNamePending ? "저장 중" : "저장"}
                   </button>
                 ) : (
                   <button
@@ -1869,17 +2031,18 @@ function GroupInfoView({ state, me, action }: { state: AppState; me: Profile; ac
           ))}
         </div>
       </div>
-    </div>
-  );
-}
 
-function Composer({ value, onChange, placeholder, button, color, onSubmit }: { value: string; onChange: (v: string) => void; placeholder: string; button: string; color: string; onSubmit: () => void }) {
-  return (
-    <div className="card rounded-3xl p-4">
-      <textarea value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className="min-h-24 w-full rounded-2xl border border-[#F2DCE5] px-4 py-3" />
-      <button onClick={onSubmit} className="mt-3 rounded-xl px-4 py-2 text-sm font-bold text-white" style={{ background: color }}>
-        {button}
-      </button>
+      <div className="border-t border-[#F2DCE5] pt-4">
+        <button
+          type="button"
+          onClick={() => {
+            if (window.confirm("이 기기에서 로그아웃할까요?")) onLogout();
+          }}
+          className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white px-4 py-3 text-sm font-bold text-[#8B7088]"
+        >
+          <LogOut size={16} aria-hidden="true" /> 이 기기에서 로그아웃
+        </button>
+      </div>
     </div>
   );
 }
@@ -1887,7 +2050,7 @@ function Composer({ value, onChange, placeholder, button, color, onSubmit }: { v
 function ReadChip({ profile, done }: { profile: Profile; done: boolean }) {
   return (
     <div className="card flex items-center gap-3 rounded-2xl p-4">
-      <span className="flex h-9 w-9 items-center justify-center rounded-full text-white" style={{ background: profile.accent_color }}>
+      <span className="flex h-9 w-9 items-center justify-center rounded-full text-white" style={{ background: profile.accent_deep }}>
         {done ? <Check size={18} /> : profile.display_name.slice(0, 1)}
       </span>
       <div>
@@ -1900,7 +2063,7 @@ function ReadChip({ profile, done }: { profile: Profile; done: boolean }) {
 
 function BackButton({ onClick }: { onClick: () => void }) {
   return (
-    <button onClick={onClick} className="inline-flex items-center gap-1 text-sm font-bold text-[#8B7088]">
+    <button type="button" onClick={onClick} className="focus-ring inline-flex min-h-11 items-center gap-1 rounded-xl px-2 text-sm font-bold text-[#8B7088]">
       <ChevronLeft size={16} /> 뒤로
     </button>
   );
@@ -1970,9 +2133,19 @@ function MiniStat({ label, value }: { label: string; value: string }) {
   );
 }
 
+function EmptyState({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="card rounded-3xl px-6 py-10 text-center" role="status">
+      <BookOpen className="mx-auto text-[#C8B5E8]" size={30} aria-hidden="true" />
+      <h2 className="mt-3 font-black">{title}</h2>
+      <p className="mt-2 text-sm leading-6 text-[#8B7088]">{body}</p>
+    </div>
+  );
+}
+
 function TabButton({ active, icon, label, badge, onClick }: { active: boolean; icon: React.ReactNode; label: string; badge?: number; onClick: () => void }) {
   return (
-    <button onClick={onClick} className={`relative flex flex-col items-center gap-1 rounded-2xl px-2 py-2 text-xs ${active ? "bg-[#FCE4EC] font-bold text-[#A93F62]" : "text-[#8B7088]"}`}>
+    <button type="button" onClick={onClick} aria-current={active ? "page" : undefined} className={`focus-ring relative flex min-h-14 flex-col items-center justify-center gap-1 rounded-2xl px-2 py-2 text-xs transition-colors ${active ? "bg-[#FCE4EC] font-bold text-[#A93F62]" : "text-[#8B7088]"}`}>
       {icon}
       {label}
       {!!badge && <Badge>{badge}</Badge>}
@@ -1982,7 +2155,7 @@ function TabButton({ active, icon, label, badge, onClick }: { active: boolean; i
 
 function IconButton({ label, children, onClick }: { label: string; children: React.ReactNode; onClick: () => void }) {
   return (
-    <button onClick={onClick} className="relative inline-flex h-10 w-10 items-center justify-center rounded-full bg-white/80 text-[#8B7088] shadow-sm" aria-label={label}>
+    <button type="button" onClick={onClick} className="focus-ring relative inline-flex h-11 w-11 items-center justify-center rounded-full bg-white/80 text-[#8B7088] shadow-sm transition-colors hover:bg-white" aria-label={label}>
       {children}
     </button>
   );
@@ -1993,14 +2166,65 @@ function Badge({ children }: { children: React.ReactNode }) {
 }
 
 function Drawer({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  const titleId = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeButtonRef.current?.focus();
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !panelRef.current) return;
+
+      const focusable = Array.from(
+        panelRef.current.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href]"),
+      );
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleKeyDown);
+      previousFocus?.focus();
+    };
+  }, []);
+
   return (
-    <div className="fixed inset-0 z-40 bg-black/20">
-      <div className="absolute inset-y-0 right-0 w-full max-w-md overflow-auto bg-[#FFF8F1] p-4 shadow-2xl">
+    <div
+      className="drawer-backdrop fixed inset-0 z-40 bg-black/20"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target) onClose();
+      }}
+    >
+      <div ref={panelRef} className="drawer-panel absolute inset-y-0 right-0 w-full max-w-md overflow-auto bg-[#FFF8F1] p-4 shadow-2xl" role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-xl font-black">{title}</h2>
-          <IconButton label="닫기" onClick={onClose}>
+          <h2 id={titleId} className="text-xl font-black">{title}</h2>
+          <button ref={closeButtonRef} type="button" onClick={onClose} className="focus-ring inline-flex h-11 w-11 items-center justify-center rounded-full bg-white/80 text-[#8B7088] shadow-sm" aria-label="닫기">
             <X size={18} />
-          </IconButton>
+          </button>
         </div>
         {children}
       </div>

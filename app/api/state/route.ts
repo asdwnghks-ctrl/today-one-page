@@ -143,8 +143,8 @@ export async function GET() {
   const requiredSegmentIds = planDay ? planDay.segment_ids : progress?.current_segment_id ? [progress.current_segment_id] : [];
 
   // miss counts (현재 책 session 기준)
-  let missCounts: Record<string, number> = {};
-  let revealedGiftMissCounts: Record<string, Record<string, number>> = {};
+  const missCounts: Record<string, number> = {};
+  const revealedGiftMissCounts: Record<string, Record<string, number>> = {};
   let manualAdvance = { available: false, missedProfileIds: [] as string[] };
   let myGift = null;
   let partnerHasGift = false;
