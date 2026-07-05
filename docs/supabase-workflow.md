@@ -12,26 +12,26 @@
 
 ## What Supabase Handles
 
-- Fixed user profiles for the two readers
-- Shared PIN session support through the app server
+- Groups (`groups`) and per-group profiles (`profiles.group_id`, `profiles.pin_hash`)
+- Per-person PIN auth (scrypt-hashed, no shared PIN at runtime anymore)
 - Postgres database
-- Reading progress
+- Reading progress per group (`reading_progress.group_id`), including reading-plan mode (`plan_day_index`, `plan_days`)
 - Book-session `session_id`
-- Missed-reading counts per book session
-- Gift promises per book session
+- Missed-reading counts per book/plan session
+- Gift promises per session (only the most recently revealed session is shown to the app)
 - Segment comments and replies
-- Highlights
+- Highlights, with verse-count data (`verse_counts`) now seeded for all 1,189 chapters, not just Ecclesiastes
 - Reactions
-- Realtime chat messages
-- Read state for chat
+
+Chat (`messages`, `message_reads`) is no longer used by the app — the feature was removed. The tables still exist (not dropped) but nothing reads/writes them anymore. Existing chat history was exported to `docs/chat-archive.md` before removal.
 
 ## Required Values
 
 To link or re-link this repository to Supabase, prepare these values:
 
-- Supabase access token
+- Supabase access token (personal access token, `sbp_...` — used for both CLI and the Management API fallback below)
 - Supabase project ref
-- Database password for the Supabase project
+- Database password for the Supabase project (only needed for `supabase db push`; not stored anywhere in this repo)
 - Project API URL
 - Project anon public key
 
@@ -70,27 +70,29 @@ The app will need these values in Vercel:
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
 SUPABASE_SECRET_KEY=
-APP_SHARED_PIN=
 ```
 
-Only `NEXT_PUBLIC_*` variables are safe for browser code. `SUPABASE_SECRET_KEY` and `APP_SHARED_PIN` are server-only.
+Only `NEXT_PUBLIC_*` variables are safe for browser code. `SUPABASE_SECRET_KEY` is server-only.
 
-## First Schema Targets
+`APP_SHARED_PIN` is **no longer read at runtime** — it was the old shared-login secret and is now only relevant to the one-off `scripts/migrate-pins.ts` script (already run once during the multi-group migration). It can stay in Vercel env harmlessly or be removed.
 
-MVP tables should cover:
+## Current Schema (post multi-group)
 
-- `profiles`: fixed user profiles for Joohwan and Heejin
-- `segments`: 1,189 Bible chapter records from `seed_data.json`
+- `groups`: invite code, owner, `max_members`, `reading_mode`
+- `profiles`: per-group members, `pin_hash`, `unique(group_id, slug)`
+- `sections`, `books`, `segments`: global Bible content, 1,189 chapter records from `seed_data.json`
+- `plan_days`: the JW 1-year reading plan, 363 rows, global (from `scripts/seed-reading-plan.ts`)
+- `reading_progress`: one row per group, `plan_day_index` for plan mode
 - `reading_states`: per-user read check state
 - `reading_misses`: per-user missed-reading records at the KST 2am boundary
-- `book_gifts`: gift promises tied to the current book session
-- `book_proposals`: proposed, accepted, started, or cancelled next-book choices
+- `book_gifts`: gift promises tied to the current session; the app only ever displays the most recently revealed session's gifts
+- `book_proposals`: now just "owner-set next book" (`accepted`/`started`/`cancelled`), no more `pending` negotiation
 - `comments`: segment comments
 - `replies`: replies to comments/highlights
 - `highlights`: verse references and notes
-- `messages`: realtime chat messages
-- `message_reads`: chat read state
-- `notifications`: app-internal unread notifications
+- `verse_counts`: full 1,189-chapter verse-count table (from `scripts/seed-verse-counts.ts`), used to render the verse-picker button grid for every book
+- `notifications`: app-internal unread notifications (no more `message` type)
+- `messages`, `message_reads`: unused leftovers from the removed chat feature, not dropped
 
 ## Applied Remote Migrations
 
@@ -122,7 +124,7 @@ order by ordinal_position;
 
 Expected columns include `session_id`.
 
-## Current Reading Recovery Note
+## Current Reading Recovery Note (historical, pre multi-group)
 
 On 2026-05-14, the live reading state was restored to:
 

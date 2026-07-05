@@ -12,13 +12,14 @@ MVP는 **Vercel + Supabase만으로 충분하다.**
 - **Language:** TypeScript
 - **Styling:** Tailwind CSS
 - **UI Components:** Tailwind 기반 로컬 컴포넌트
-- **Animation:** Framer Motion
 - **Icons:** lucide-react
 - **Backend:** Supabase
 - **Database:** Supabase Postgres
-- **Realtime:** Supabase Realtime
-- **Auth:** 공유 PIN + httpOnly cookie 기반 이름 선택 로그인
+- **Realtime:** Supabase Realtime (그룹별 스코핑된 상태 변경 브로드캐스트만, 채팅/presence는 제거됨)
+- **Auth:** 초대코드 + 그룹별 개인 PIN(scrypt 해싱) + httpOnly cookie 2개(`top_group`, `top_profile`)
 - **Deploy:** Vercel
+
+> `together_app_mockup-1.jsx` 초기 목업에는 Framer Motion이 쓰였지만, 실제 구현(`app/page.tsx`)은 별도 애니메이션 라이브러리 없이 Tailwind transition만으로 처리했다. `package.json`에는 여전히 `framer-motion`이 있지만 코드에서 import하지 않는다.
 
 ## 왜 이 조합인가
 
@@ -33,18 +34,16 @@ MVP는 **Vercel + Supabase만으로 충분하다.**
 
 ## Supabase가 맡는 것
 
-- 두 사람의 사용자 정보
-- 로그인/세션 관리
-- 책, segment seed 데이터
+- 그룹/사용자 정보 (`groups`, `profiles`)
+- 로그인/세션 관리 (초대코드 + PIN 검증)
+- 책, segment, 읽기 계획표(`plan_days`), 절 수(`verse_counts`) seed 데이터
 - 성서 segment 읽음 체크 상태
-- 책 회차별 못 읽음 기록
-- 책 회차별 선물 약속과 공개 상태
-- 다음 책 제안/수락 상태
+- 회차별 못 읽음 기록
+- 회차별 선물 약속과 공개 상태
+- 다음 책 지정/자동 선택 상태 (`book_proposals`)
 - 하이라이트
 - 장별 코멘트와 답글
-- 실시간 채팅 메시지
-- 메신저 메시지 읽음 상태
-- 메신저 접속 상태 presence
+- 그룹별 스코핑된 실시간 상태 변경 브로드캐스트
 - 나중에 이미지가 필요해지면 Storage
 
 현재 Supabase 상태:
@@ -56,7 +55,9 @@ MVP는 **Vercel + Supabase만으로 충분하다.**
 - Project URL: `https://ggezuvdhuaizerfmkevl.supabase.co`
 - Local link: 완료
 
-Supabase CLI 자동 로그인은 비대화형 터미널에서 막히므로, Dashboard에서 access token을 만든 뒤 CLI에 전달해야 한다.
+Supabase CLI 자동 로그인은 비대화형 터미널에서 막히므로, Dashboard에서 access token을 만든 뒤 CLI에 전달해야 한다. `supabase db push`는 DB 비밀번호가 필요한데 저장해두지 않으므로, 마이그레이션은 Supabase Management API(`POST /v1/projects/{ref}/database/query`, personal access token 인증)로 직접 SQL을 실행해서 적용했다. 이 경로는 CLI가 막힐 때의 대안으로 계속 쓸 수 있다.
+
+> **1000행 캡 주의:** 호스팅된 프로젝트는 PostgREST 응답을 클라이언트가 요청한 range와 무관하게 1000행으로 제한한다. `segments`(1,189행), `verse_counts`(1,189행)처럼 이 이상인 테이블은 반드시 `.range()`로 나눠서 가져와야 한다(`app/api/state/route.ts`의 `fetchAllRows` 참고). 새 테이블이 1000행을 넘어갈 가능성이 있으면 처음부터 페이지네이션을 고려한다.
 
 ## Vercel이 맡는 것
 
@@ -93,12 +94,11 @@ local commit -> auto git push -> GitHub main -> Vercel deployment
 
 지금 앱의 서버 작업은 Next.js Route Handler와 Supabase로 충분하다.
 
-- 로그인
+- 로그인 / 그룹 생성 / 초대코드 참여
 - 상태 조회
 - 읽음 체크
 - 코멘트/하이라이트/반응 저장
-- 책 제안/수락
-- 채팅 메시지 저장
+- 다음 책 지정/자동 선택
 - 앱 안 알림 읽음 처리
 
 Render가 유용해질 수 있는 경우:
@@ -110,40 +110,26 @@ Render가 유용해질 수 있는 경우:
 
 현재는 인프라를 늘리기보다 Vercel + Supabase 조합을 유지한다.
 
-## 실시간 채팅 방식
+## 실시간 방식 (채팅 제거 이후)
 
-채팅 메시지는 Supabase Postgres의 `messages` 테이블에 저장한다. 새 메시지가 insert되면 Supabase Realtime subscription으로 상대 화면에 즉시 반영한다.
+실시간 채팅 기능은 완전히 제거했다. `messages`/`message_reads` 테이블은 스키마상 남아있지만(마이그레이션에서 일부러 drop하지 않음) 앱은 더 이상 쓰지 않는다. 기존 대화 내용은 `docs/chat-archive.md`로 텍스트 내보내기해서 보존했다.
 
-MVP 메시지 모델:
-
-```sql
-messages
-- id
-- sender_id
-- body
-- created_at
-- edited_at
-- deleted_at
-```
-
-두 사람만 쓰는 앱이므로 처음에는 `room_id` 없이 시작해도 된다. 나중에 구조를 더 일반화하고 싶으면 `chat_rooms`, `chat_members`를 추가할 수 있다.
-
-메신저 접속 상태는 Supabase Realtime Presence로 처리한다. 앱이 열려 있으면 현재 사용자를 chat presence channel에 등록하고, 상대가 같은 channel에 있으면 접속 중으로 표시한다.
-
-메신저 읽음 상태는 `message_reads` 테이블로 처리한다. 사용자가 둘뿐이라도 누가 언제 읽었는지 명확히 남기는 편이 안전하다. 성서 코멘트에는 `read_at`이나 presence 개념을 붙이지 않는다.
+지금 Supabase Realtime은 훨씬 단순한 용도로만 쓰인다: 그룹별로 스코핑된 채널(`group-${groupId}-live`)에서 "누군가 상태를 바꿨다"는 `broadcast` 이벤트만 주고받고, 받는 쪽은 전체 상태를 다시 fetch한다. 채팅 전용이던 presence(접속 중 표시)도 함께 제거했다 — 채널 이름이 그룹별로 나뉘어 있어서 다른 그룹의 브로드캐스트가 새지 않는 것만 신경 쓰면 된다.
 
 ## 인증 방향
 
-회원가입은 만들지 않는다. 화면은 이름 선택 + 비밀번호 입력처럼 보이게 만든다.
+회원가입은 만들지 않는다. 화면은 초대코드 입력 → 이름 선택 → 비밀번호 입력처럼 보이게 만든다.
 
-### 현재 선택: 공유 PIN + httpOnly cookie
+### 현재 선택: 초대코드 + 그룹별 개인 PIN + httpOnly cookie 2개
 
-- 주환, 희진 profile을 Supabase에 미리 만들어둔다.
-- 앱 서버는 `APP_SHARED_PIN`을 확인한다.
-- PIN이 맞으면 `top_profile` httpOnly cookie에 현재 사용자 slug를 저장한다.
+- 그룹을 만들거나 참여할 때 각자 자기 PIN을 직접 정한다(그룹 공용 PIN 없음).
+- `lib/pin.ts`가 Node 내장 `crypto.scrypt`로 PIN을 해싱한다(`"scrypt:salt:hash"` 형식). 새 의존성 추가 없이 처리했다.
+- 로그인 성공 시 `top_group`(그룹 id) + `top_profile`(slug) 두 개의 httpOnly cookie를 설정한다.
 - 브라우저는 Supabase service role key를 직접 갖지 않는다.
 
-사용자는 단순한 PIN/비밀번호 로그인처럼 느낀다. 나중에 보안을 더 엄격하게 가져가야 하면 Supabase Auth로 전환할 수 있다.
+최초 사용자였던 주환/희진은 마이그레이션 시 기존 공유 PIN(`APP_SHARED_PIN`)이 각자의 초기 개인 PIN으로 해싱되어 들어갔다(로그인 경험 유지, `scripts/migrate-pins.ts`). 이후 `APP_SHARED_PIN`은 런타임에서 더 이상 읽지 않는다.
+
+사용자는 단순한 초대코드+PIN 로그인처럼 느낀다. 나중에 보안을 더 엄격하게 가져가야 하면 Supabase Auth로 전환할 수 있다.
 
 ## 지금 당장 필요한 외부 도구
 
